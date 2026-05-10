@@ -1,0 +1,50 @@
+[project]
+name = "auto-report-agent"
+version = "0.1.0"
+description = "A CrewAI project for research, writing, review, and literature-analysis report generation."
+readme = "README.md"
+authors = [
+    { name = "Z_jl" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.10,<3.14"
+keywords = ["crewai", "agent", "streamlit", "openai-compatible", "report-generation"]
+dependencies = [
+    "crewai>=0.100.0",
+    "python-dotenv>=1.0.0",
+    "streamlit>=1.30.0",
+    "reportlab>=4.0.0",
+    "python-docx>=1.1.0",
+    "pypdf>=5.0.0",
+    "openai>=1.0.0"
+]
+
+[project.scripts]
+auto-report-agent = "auto_report_agent.main:run"
+
+[project.urls]
+Homepage = "https://github.com/Z-jl/auto_report_agent"
+Repository = "https://github.com/Z-jl/auto_report_agent"
+Issues = "https://github.com/Z-jl/auto_report_agent/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auto_report_agent"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.8.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501", "E402"]
