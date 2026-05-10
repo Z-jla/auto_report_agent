@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from io import BytesIO
-import re
 
 
 @dataclass
@@ -22,7 +22,7 @@ def markdown_to_docx_bytes(markdown_text: str, title: str = "Auto Report") -> by
     try:
         from docx import Document
         from docx.oxml.ns import qn
-        from docx.shared import Pt, Inches, RGBColor
+        from docx.shared import Inches, Pt, RGBColor
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("缺少 Word 导出依赖 python-docx，请先运行：pip install -e .") from exc
 

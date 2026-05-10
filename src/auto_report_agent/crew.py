@@ -3,12 +3,11 @@ from typing import List
 
 from auto_report_agent.settings import initialize_runtime
 
-
 initialize_runtime()
 
 from crewai import Agent, Crew, Process, Task  # noqa: E402
-from crewai.project import CrewBase, agent, crew, task  # noqa: E402
 from crewai.agents.agent_builder.base_agent import BaseAgent  # noqa: E402
+from crewai.project import CrewBase, agent, crew, task  # noqa: E402
 
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool  # noqa: E402
 

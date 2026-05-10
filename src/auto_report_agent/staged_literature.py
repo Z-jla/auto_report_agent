@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import hashlib
 import re
 import time
 import urllib.error
@@ -14,7 +14,6 @@ from typing import Callable, Sequence
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
 from auto_report_agent.settings import OUTPUT_DIR, initialize_runtime
-
 
 ProgressCallback = Callable[[str], None]
 CACHE_VERSION = "staged-literature-v2"

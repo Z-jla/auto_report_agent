@@ -12,10 +12,8 @@ import streamlit as st
 
 from auto_report_agent.settings import LAST_RUN_FILE, OUTPUT_FILE, initialize_runtime
 
-
 initialize_runtime()
 
-from auto_report_agent.crew import AutoReportCrew  # noqa: E402
 from auto_report_agent.api_config import (  # noqa: E402
     PROVIDER_PRESETS,
     api_environment,
@@ -28,15 +26,15 @@ from auto_report_agent.cache_manager import (  # noqa: E402
     scan_cache,
     total_cache_bytes,
 )
+from auto_report_agent.crew import AutoReportCrew  # noqa: E402
 from auto_report_agent.document_ingest import (  # noqa: E402
     build_paper_preview,
     parse_uploaded_documents,
 )
-from auto_report_agent.staged_literature import summarize_documents_staged  # noqa: E402
 from auto_report_agent.docx_export import markdown_to_docx_bytes  # noqa: E402
 from auto_report_agent.pdf_export import markdown_to_pdf_bytes  # noqa: E402
+from auto_report_agent.staged_literature import summarize_documents_staged  # noqa: E402
 from auto_report_agent.vision import analyze_image_content  # noqa: E402
-
 
 ProgressCallback = Callable[[str], None]
 

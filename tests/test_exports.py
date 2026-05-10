@@ -1,7 +1,6 @@
 from auto_report_agent.docx_export import markdown_to_docx_bytes
 from auto_report_agent.pdf_export import markdown_to_pdf_bytes
 
-
 SAMPLE_MARKDOWN = """# 测试报告
 
 这是一段包含 **加粗**、`代码` 和 [链接](https://example.com) 的内容。

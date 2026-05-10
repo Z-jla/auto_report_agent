@@ -8,7 +8,6 @@ from typing import Iterable, Sequence
 
 from docx import Document
 
-
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 DEFAULT_MAX_DOCS = 5
 DEFAULT_MAX_CHARS_PER_DOC = 18000

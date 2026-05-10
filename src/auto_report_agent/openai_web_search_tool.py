@@ -8,7 +8,6 @@ from crewai.tools import BaseTool
 
 from auto_report_agent.settings import initialize_runtime
 
-
 initialize_runtime()
 
 

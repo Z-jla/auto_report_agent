@@ -1,10 +1,12 @@
 from auto_report_agent.settings import initialize_runtime
 
-
 initialize_runtime()
 
 from auto_report_agent.crew import AutoReportCrew  # noqa: E402
-from auto_report_agent.document_ingest import build_paper_context, parse_document_paths  # noqa: E402
+from auto_report_agent.document_ingest import (  # noqa: E402
+    build_paper_context,
+    parse_document_paths,
+)
 
 
 def run() -> None:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from io import BytesIO
-from html import escape
 import re
+from html import escape
+from io import BytesIO
 
 
 def markdown_to_pdf_bytes(markdown_text: str, title: str = "Auto Report") -> bytes:
