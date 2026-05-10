@@ -14,7 +14,7 @@
 ## 功能特性
 
 - **多 Agent 工作流**：研究员、写作者、审核员分工协作。
-- **联网搜索**：支持 OpenAI 兼容商的 Responses API `web_search_preview`。
+- **联网搜索**：支持遵循 OpenAI 协议的服务商的 Responses API `web_search_preview` 工具。
 - **主题报告生成**：输入一个主题，自动搜索资料、整理观点、撰写报告并审核。
 - **图片识别**：上传截图、图表、论文页面或题目图片，先识别图片内容，再生成报告。
 - **文献分析**：上传 PDF / 文档，分阶段提取内容并生成文献综述或分析报告。
@@ -56,7 +56,7 @@ auto_report_agent/
 ## 环境要求
 
 - Python `>=3.10,<3.14`
-- 支持所有 OpenAI API 兼容商 / OpenAI-compatible API 接口
+- 支持任何遵循 OpenAI 协议的 API 服务，包括 OpenAI、Azure OpenAI、DeepSeek、Qwen、Kimi、智谱 GLM、Ollama、vLLM 等官方或自建服务，以及各类第三方聚合商
 - 如需联网搜索，服务商需要支持 Responses API 的 `web_search_preview` 工具
 - 如需图片识别，模型需要支持视觉输入
 
@@ -98,20 +98,23 @@ Copy-Item .env.example .env
 编辑 `.env`：
 
 ```env
-OPENAI_API_KEY=你的 API Key
-OPENAI_API_BASE=https://你的兼容商地址/v1
-OPENAI_MODEL_NAME=你的模型名
+# 推荐：使用 LLM_* 命名（与 CrewAI / LiteLLM 保持一致）
+LLM_API_KEY=你的 API Key
+LLM_BASE_URL=https://你的兼容商地址/v1
+LLM_MODEL=你的模型名
 
 # 如果视觉模型和文本模型不同，可以单独配置
-OPENAI_VISION_MODEL_NAME=
+LLM_VISION_MODEL=
 
 # chat：普通 Chat Completions
 # responses：Responses API，适合 web_search_preview
-OPENAI_API_MODE=chat
+LLM_API_MODE=chat
 
 # 是否启用兼容商 Web Search
 ENABLE_WEB_SEARCH=false
 ```
+
+> 兼容性：旧的 `OPENAI_API_KEY`、`OPENAI_API_BASE`、`OPENAI_MODEL_NAME`、`OPENAI_VISION_MODEL_NAME`、`OPENAI_API_MODE` 仍然可用（作为 fallback）。同时设置时，优先读取 `LLM_*`。
 
 > 注意：不要把 `.env` 提交到 GitHub。项目已经在 `.gitignore` 中忽略 `.env`。
 
@@ -177,9 +180,9 @@ pytest -q
 
 ## 常见问题
 
-### 1. 为什么 OpenAI 兼容商不能搜索？
+### 1. 为什么有的兼容服务不能联网搜索？
 
-普通 Chat Completions 只负责文本生成，不等于具备联网搜索。项目里的联网搜索依赖兼容商是否支持类似 OpenAI Responses API 的 `web_search_preview` 工具。
+普通 Chat Completions 只负责文本生成，不等于具备联网搜索。项目里的联网搜索依赖服务商是否支持 OpenAI Responses API 的 `web_search_preview` 工具。
 
 ### 2. PDF 和网页显示不完全一样怎么办？
 

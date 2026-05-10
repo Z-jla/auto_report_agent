@@ -29,14 +29,23 @@ def analyze_image_content(
     Returns a Markdown text containing OCR result, visual description, key facts,
     and suggested next-step task interpretation.
     """
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    base_url = os.getenv("OPENAI_API_BASE", "").strip().rstrip("/")
-    model = os.getenv("OPENAI_VISION_MODEL_NAME", os.getenv("OPENAI_MODEL_NAME", "gpt-5.5")).strip()
+    api_key = (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
+    base_url = (
+        os.getenv("LLM_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or os.getenv("OPENAI_BASE_URL", "")
+    ).strip().rstrip("/")
+    model = (
+        os.getenv("LLM_VISION_MODEL")
+        or os.getenv("OPENAI_VISION_MODEL_NAME")
+        or os.getenv("LLM_MODEL")
+        or os.getenv("OPENAI_MODEL_NAME", "gpt-5.5")
+    ).strip()
 
     if not api_key:
-        raise RuntimeError("缺少 OPENAI_API_KEY，无法进行图片识别。")
+        raise RuntimeError("缺少 LLM_API_KEY（或 OPENAI_API_KEY），无法进行图片识别。")
     if not base_url:
-        raise RuntimeError("缺少 OPENAI_API_BASE，无法进行图片识别。")
+        raise RuntimeError("缺少 LLM_BASE_URL（或 OPENAI_API_BASE），无法进行图片识别。")
     if not image_bytes:
         raise RuntimeError("图片内容为空。")
 
@@ -77,7 +86,7 @@ def analyze_image_content(
     except (AuthenticationError, PermissionDeniedError) as exc:
         raise RuntimeError(
             f"图片识别失败：API Key 鉴权未通过（{exc.__class__.__name__}）。"
-            " 请检查 OPENAI_API_KEY、OPENAI_API_BASE 是否匹配。"
+            " 请检查 LLM_API_KEY / LLM_BASE_URL（或 OPENAI_API_KEY / OPENAI_API_BASE）是否匹配。"
         ) from exc
     except (APIConnectionError, APITimeoutError) as exc:
         raise RuntimeError(

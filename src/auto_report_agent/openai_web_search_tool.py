@@ -20,10 +20,14 @@ class OpenAIWebSearchTool(BaseTool):
     )
 
     def _run(self, query: str) -> str:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        base_url = os.getenv("OPENAI_API_BASE", "").strip().rstrip("/")
-        model = os.getenv("OPENAI_MODEL_NAME", "gpt-5.5").strip()
-        api_mode = os.getenv("OPENAI_API_MODE", "chat").strip().lower()
+        api_key = (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
+        base_url = (
+            os.getenv("LLM_BASE_URL")
+            or os.getenv("OPENAI_API_BASE")
+            or os.getenv("OPENAI_BASE_URL", "")
+        ).strip().rstrip("/")
+        model = (os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL_NAME", "gpt-5.5")).strip()
+        api_mode = (os.getenv("LLM_API_MODE") or os.getenv("OPENAI_API_MODE", "chat")).strip().lower()
         enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "false").strip().lower() in {
             "1",
             "true",
@@ -32,9 +36,9 @@ class OpenAIWebSearchTool(BaseTool):
         }
 
         if not api_key:
-            return "搜索失败：缺少 OPENAI_API_KEY。"
+            return "搜索失败：缺少 LLM_API_KEY（或 OPENAI_API_KEY）。"
         if not base_url:
-            return "搜索失败：缺少 OPENAI_API_BASE。"
+            return "搜索失败：缺少 LLM_BASE_URL（或 OPENAI_API_BASE）。"
         if api_mode != "responses" or not enable_web_search:
             return (
                 "已跳过联网搜索：当前 API 配置未启用 Responses API web_search_preview。"

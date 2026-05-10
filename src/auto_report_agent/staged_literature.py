@@ -213,15 +213,19 @@ def _extract_response_text(data: dict) -> str:
 
 
 def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: int = 1) -> str:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    base_url = os.getenv("OPENAI_API_BASE", "").strip().rstrip("/")
-    model = os.getenv("OPENAI_MODEL_NAME", "gpt-5.5").strip()
-    api_mode = os.getenv("OPENAI_API_MODE", "chat").strip().lower()
+    api_key = (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
+    base_url = (
+        os.getenv("LLM_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or os.getenv("OPENAI_BASE_URL", "")
+    ).strip().rstrip("/")
+    model = (os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL_NAME", "gpt-5.5")).strip()
+    api_mode = (os.getenv("LLM_API_MODE") or os.getenv("OPENAI_API_MODE", "chat")).strip().lower()
 
     if not api_key:
-        raise RuntimeError("缺少 OPENAI_API_KEY，无法进行分阶段文献分析。")
+        raise RuntimeError("缺少 LLM_API_KEY（或 OPENAI_API_KEY），无法进行分阶段文献分析。")
     if not base_url:
-        raise RuntimeError("缺少 OPENAI_API_BASE，无法进行分阶段文献分析。")
+        raise RuntimeError("缺少 LLM_BASE_URL（或 OPENAI_API_BASE），无法进行分阶段文献分析。")
 
     if api_mode == "responses":
         endpoint = f"{base_url}/responses"

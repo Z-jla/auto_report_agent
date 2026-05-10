@@ -21,7 +21,8 @@ pip install -e ".[dev]"
 
 ```bash
 cp .env.example .env
-# 编辑 .env，至少填上 OPENAI_API_KEY / OPENAI_API_BASE / OPENAI_MODEL_NAME
+# 编辑 .env，至少填上 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+# （旧名 OPENAI_API_KEY / OPENAI_API_BASE / OPENAI_MODEL_NAME 仍然兼容）
 ```
 
 ## 本地验证

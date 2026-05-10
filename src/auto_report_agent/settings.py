@@ -41,8 +41,37 @@ def load_environment() -> bool:
     return load_dotenv(ENV_FILE)
 
 
+_LLM_ALIASES: dict[str, tuple[str, ...]] = {
+    "LLM_API_KEY": ("OPENAI_API_KEY",),
+    "LLM_BASE_URL": ("OPENAI_API_BASE", "OPENAI_BASE_URL"),
+    "LLM_MODEL": ("OPENAI_MODEL_NAME",),
+    "LLM_VISION_MODEL": ("OPENAI_VISION_MODEL_NAME",),
+    "LLM_API_MODE": ("OPENAI_API_MODE",),
+}
+
+
+def normalize_llm_env() -> None:
+    """Mirror friendly LLM_* env vars onto the canonical OPENAI_* names.
+
+    Users can set either LLM_API_KEY (recommended in docs) or OPENAI_API_KEY
+    (what the openai SDK and CrewAI/LiteLLM actually read). We accept both and
+    propagate in either direction so downstream libraries always see OPENAI_*.
+    If both are set, the explicit OPENAI_* value wins.
+    """
+    for friendly, legacy_names in _LLM_ALIASES.items():
+        friendly_value = os.environ.get(friendly, "").strip()
+        canonical = legacy_names[0]
+        canonical_set = bool(os.environ.get(canonical, "").strip())
+        if friendly_value and not canonical_set:
+            for name in legacy_names:
+                os.environ[name] = friendly_value
+        elif canonical_set and not friendly_value:
+            os.environ[friendly] = os.environ[canonical]
+
+
 def initialize_runtime() -> None:
     """Apply runtime defaults shared by CLI, Streamlit and helper modules."""
     force_utf8_stdio()
     setup_local_crewai_paths()
     load_environment()
+    normalize_llm_env()
