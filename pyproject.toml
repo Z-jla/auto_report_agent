@@ -23,9 +23,9 @@ dependencies = [
 auto-report-agent = "auto_report_agent.main:run"
 
 [project.urls]
-Homepage = "https://github.com/Z-jl/auto_report_agent"
-Repository = "https://github.com/Z-jl/auto_report_agent"
-Issues = "https://github.com/Z-jl/auto_report_agent/issues"
+Homepage = "https://github.com/Z-jla/auto_report_agent"
+Repository = "https://github.com/Z-jla/auto_report_agent"
+Issues = "https://github.com/Z-jla/auto_report_agent/issues"
 
 [build-system]
 requires = ["hatchling"]
@@ -38,7 +38,6 @@ packages = ["src/auto_report_agent"]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.5.0",
-    "mypy>=1.8.0",
 ]
 
 [tool.ruff]
@@ -46,5 +45,5 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F"]
-ignore = ["E501", "E402"]
+select = ["E", "F", "I", "B"]
+ignore = ["E501", "E402", "B008"]

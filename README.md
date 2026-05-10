@@ -1,5 +1,12 @@
 ﻿# Auto Report Agent
 
+[![CI](https://github.com/Z-jla/auto_report_agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Z-jla/auto_report_agent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+
+> **项目状态：实验性 / 作品展示（portfolio project）**。接口与行为可能随时调整，不建议直接用于生产环境。
+
 一个基于 **CrewAI + Streamlit + OpenAI-compatible API** 的自动报告生成项目。用户输入主题、上传图片或上传文献后，系统会按「研究 → 写作 → 审核」流程生成高质量 Markdown 报告，并支持导出 PDF / Word。
 
 这个项目适合作为 AI Agent / 多 Agent 协作 / 自动化研究写作方向的实习作品展示。
@@ -56,7 +63,7 @@ auto_report_agent/
 ## 安装
 
 ```bash
-git clone https://github.com/Z-jl/auto_report_agent.git
+git clone https://github.com/Z-jla/auto_report_agent.git
 cd auto_report_agent
 
 python -m venv .venv

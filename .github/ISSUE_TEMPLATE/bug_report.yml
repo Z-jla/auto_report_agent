@@ -1,0 +1,72 @@
+name: Bug report
+description: 报告一个项目运行中的错误或异常行为
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请不要在本 issue 里贴任何 API Key、token 或个人敏感信息。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 清晰描述你遇到的问题。
+      placeholder: 运行 streamlit 后点击生成报告，页面卡在研究阶段 5 分钟后超时……
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 按顺序列出能复现问题的最小步骤。
+      placeholder: |
+        1. 克隆仓库 & `pip install -e .`
+        2. 配置 `.env`（使用的是 xxx 兼容商）
+        3. `streamlit run app.py`
+        4. 选择「文献分析」并上传某个 PDF
+        5. 点击「生成报告」
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图
+      description: 请提供相关日志或截图，**注意先脱敏，不要包含 API Key 或 URL 中的 token**。
+      render: shell
+  - type: input
+    id: python
+    attributes:
+      label: Python 版本
+      placeholder: "3.11.9"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: "Windows 11 / macOS 14 / Ubuntu 22.04"
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: API 兼容商
+      description: 比如 OpenAI、Azure OpenAI、DeepSeek、Qwen 等。
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认本 issue 中不包含 API Key、token 等敏感信息
+          required: true
+        - label: 我已搜索过现有 issue，没有重复
+          required: true
