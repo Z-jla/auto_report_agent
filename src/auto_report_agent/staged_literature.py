@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from auto_report_agent.api_config import resolve_llm_env
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
 from auto_report_agent.settings import OUTPUT_DIR, initialize_runtime
@@ -212,39 +213,34 @@ def _extract_response_text(data: dict) -> str:
 
 
 def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: int = 1) -> str:
-    api_key = (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
-    base_url = (
-        os.getenv("LLM_BASE_URL")
-        or os.getenv("OPENAI_API_BASE")
-        or os.getenv("OPENAI_BASE_URL", "")
-    ).strip().rstrip("/")
-    model = (os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL_NAME", "gpt-5.5")).strip()
-    api_mode = (os.getenv("LLM_API_MODE") or os.getenv("OPENAI_API_MODE", "chat")).strip().lower()
+    env = resolve_llm_env()
 
-    if not api_key:
+    if not env.api_key:
         raise RuntimeError("缺少 LLM_API_KEY（或 OPENAI_API_KEY），无法进行分阶段文献分析。")
-    if not base_url:
+    if not env.base_url:
         raise RuntimeError("缺少 LLM_BASE_URL（或 OPENAI_API_BASE），无法进行分阶段文献分析。")
+    if not env.model:
+        raise RuntimeError("缺少 LLM_MODEL（或 OPENAI_MODEL_NAME），无法进行分阶段文献分析。")
 
-    if api_mode == "responses":
-        endpoint = f"{base_url}/responses"
+    if env.api_mode == "responses":
+        endpoint = f"{env.base_url}/responses"
         payload = {
-            "model": model,
+            "model": env.model,
             "input": prompt,
             "store": False,
             "max_output_tokens": max_output_tokens,
         }
     else:
-        endpoint = f"{base_url}/chat/completions"
+        endpoint = f"{env.base_url}/chat/completions"
         payload = {
-            "model": model,
+            "model": env.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
             "max_tokens": max_output_tokens,
         }
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {env.api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
         "User-Agent": "auto-report-agent/0.1 staged-literature",

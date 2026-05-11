@@ -1,11 +1,11 @@
 import json
-import os
 import urllib.error
 import urllib.request
 from typing import Any
 
 from crewai.tools import BaseTool
 
+from auto_report_agent.api_config import resolve_llm_env
 from auto_report_agent.settings import initialize_runtime
 
 initialize_runtime()
@@ -19,26 +19,15 @@ class OpenAIWebSearchTool(BaseTool):
     )
 
     def _run(self, query: str) -> str:
-        api_key = (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
-        base_url = (
-            os.getenv("LLM_BASE_URL")
-            or os.getenv("OPENAI_API_BASE")
-            or os.getenv("OPENAI_BASE_URL", "")
-        ).strip().rstrip("/")
-        model = (os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL_NAME", "gpt-5.5")).strip()
-        api_mode = (os.getenv("LLM_API_MODE") or os.getenv("OPENAI_API_MODE", "chat")).strip().lower()
-        enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "false").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        env = resolve_llm_env()
 
-        if not api_key:
+        if not env.api_key:
             return "搜索失败：缺少 LLM_API_KEY（或 OPENAI_API_KEY）。"
-        if not base_url:
+        if not env.base_url:
             return "搜索失败：缺少 LLM_BASE_URL（或 OPENAI_API_BASE）。"
-        if api_mode != "responses" or not enable_web_search:
+        if not env.model:
+            return "搜索失败：缺少 LLM_MODEL（或 OPENAI_MODEL_NAME）。"
+        if env.api_mode != "responses" or not env.enable_web_search:
             return (
                 "已跳过联网搜索：当前 API 配置未启用 Responses API web_search_preview。"
                 "如果你的服务商支持 Responses 工具调用，请在侧边栏把后端直连接口改为 responses，"
@@ -46,7 +35,7 @@ class OpenAIWebSearchTool(BaseTool):
             )
 
         payload = {
-            "model": model,
+            "model": env.model,
             "input": (
                 "请联网搜索并整理资料。要求：\n"
                 "1. 优先使用最新、可信的信息；\n"
@@ -60,11 +49,11 @@ class OpenAIWebSearchTool(BaseTool):
         }
 
         request = urllib.request.Request(
-            f"{base_url}/responses",
+            f"{env.base_url}/responses",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {env.api_key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "User-Agent": "auto-report-agent/0.1",

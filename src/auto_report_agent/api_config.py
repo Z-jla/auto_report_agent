@@ -83,22 +83,88 @@ API_ENV_KEYS = {
 _API_ENV_LOCK = threading.RLock()
 
 
-def default_api_config() -> dict[str, str | bool]:
-    base_url = (
-        os.getenv("LLM_BASE_URL")
-        or os.getenv("OPENAI_API_BASE")
-        or os.getenv("OPENAI_BASE_URL")
-        or ""
+def _first_env(*names: str) -> str:
+    """Return the first non-empty environment variable among ``names``, stripped."""
+    for name in names:
+        value = os.getenv(name, "")
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+@dataclass(frozen=True)
+class ResolvedLLMConfig:
+    """Runtime view of the active LLM environment, with LLM_* taking priority over OPENAI_*."""
+
+    api_key: str
+    base_url: str
+    model: str
+    vision_model: str
+    api_mode: str
+    enable_web_search: bool
+
+    def require(self, *fields: str) -> None:
+        """Raise ``RuntimeError`` when any requested field is empty."""
+        labels = {
+            "api_key": "LLM_API_KEY（或 OPENAI_API_KEY）",
+            "base_url": "LLM_BASE_URL（或 OPENAI_API_BASE）",
+            "model": "LLM_MODEL（或 OPENAI_MODEL_NAME）",
+            "vision_model": "LLM_VISION_MODEL（或 OPENAI_VISION_MODEL_NAME / LLM_MODEL）",
+        }
+        missing = [labels[field] for field in fields if not getattr(self, field, "")]
+        if missing:
+            raise RuntimeError("缺少环境变量：" + "、".join(missing))
+
+
+def resolve_llm_env(*, prefer_vision_model: bool = False) -> ResolvedLLMConfig:
+    """Read the current LLM-related environment into a single config object.
+
+    ``prefer_vision_model=True`` makes ``model`` fall back through the vision-model
+    aliases first (useful for image analysis). ``api_mode`` is normalized to
+    ``"chat"`` or ``"responses"``. No default model name is invented — callers must
+    check ``ResolvedLLMConfig.require(...)`` (or use the raised error directly) to
+    surface a clean message when the user forgot to configure a model.
+    """
+    api_key = _first_env("LLM_API_KEY", "OPENAI_API_KEY")
+    base_url = _first_env("LLM_BASE_URL", "OPENAI_API_BASE", "OPENAI_BASE_URL").rstrip("/")
+    text_model = _first_env("LLM_MODEL", "OPENAI_MODEL_NAME")
+    vision_model = _first_env("LLM_VISION_MODEL", "OPENAI_VISION_MODEL_NAME")
+
+    if prefer_vision_model:
+        model = vision_model or text_model
+    else:
+        model = text_model
+
+    raw_mode = _first_env("LLM_API_MODE", "OPENAI_API_MODE") or "chat"
+    api_mode = "responses" if raw_mode.lower() == "responses" else "chat"
+
+    enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    return ResolvedLLMConfig(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        vision_model=vision_model,
+        api_mode=api_mode,
+        enable_web_search=enable_web_search,
     )
+
+
+def default_api_config() -> dict[str, str | bool]:
+    resolved = resolve_llm_env()
     return {
         "provider": os.getenv("API_PROVIDER_NAME", "自定义 OpenAI-compatible"),
-        "api_key": os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", ""),
-        "base_url": base_url,
-        "model": os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL_NAME", ""),
-        "vision_model": os.getenv("LLM_VISION_MODEL") or os.getenv("OPENAI_VISION_MODEL_NAME", ""),
-        "api_mode": os.getenv("LLM_API_MODE") or os.getenv("OPENAI_API_MODE", "chat"),
-        "enable_web_search": os.getenv("ENABLE_WEB_SEARCH", "false").lower()
-        in {"1", "true", "yes", "on"},
+        "api_key": resolved.api_key,
+        "base_url": resolved.base_url,
+        "model": resolved.model,
+        "vision_model": resolved.vision_model,
+        "api_mode": resolved.api_mode,
+        "enable_web_search": resolved.enable_web_search,
     }
 
 

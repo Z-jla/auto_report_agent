@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import os
 
 from openai import (
     APIConnectionError,
@@ -14,6 +13,7 @@ from openai import (
     RateLimitError,
 )
 
+from auto_report_agent.api_config import resolve_llm_env
 from auto_report_agent.settings import initialize_runtime
 
 initialize_runtime()
@@ -29,28 +29,21 @@ def analyze_image_content(
     Returns a Markdown text containing OCR result, visual description, key facts,
     and suggested next-step task interpretation.
     """
-    api_key = (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
-    base_url = (
-        os.getenv("LLM_BASE_URL")
-        or os.getenv("OPENAI_API_BASE")
-        or os.getenv("OPENAI_BASE_URL", "")
-    ).strip().rstrip("/")
-    model = (
-        os.getenv("LLM_VISION_MODEL")
-        or os.getenv("OPENAI_VISION_MODEL_NAME")
-        or os.getenv("LLM_MODEL")
-        or os.getenv("OPENAI_MODEL_NAME", "gpt-5.5")
-    ).strip()
+    env = resolve_llm_env(prefer_vision_model=True)
 
-    if not api_key:
+    if not env.api_key:
         raise RuntimeError("缺少 LLM_API_KEY（或 OPENAI_API_KEY），无法进行图片识别。")
-    if not base_url:
+    if not env.base_url:
         raise RuntimeError("缺少 LLM_BASE_URL（或 OPENAI_API_BASE），无法进行图片识别。")
+    if not env.model:
+        raise RuntimeError(
+            "缺少视觉模型：请设置 LLM_VISION_MODEL 或 LLM_MODEL（或其 OPENAI_* 对应名）。"
+        )
     if not image_bytes:
         raise RuntimeError("图片内容为空。")
 
     data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = OpenAI(api_key=env.api_key, base_url=env.base_url)
 
     prompt = f"""
 你是一个严谨的多模态信息分析助手。请识别用户上传图片中的内容，并输出结构化 Markdown。
@@ -67,7 +60,7 @@ def analyze_image_content(
 
     try:
         response = client.chat.completions.create(
-            model=model,
+            model=env.model,
             messages=[
                 {
                     "role": "user",
@@ -101,7 +94,7 @@ def analyze_image_content(
         # Chat Completions 拒绝请求或路径不存在，多半是兼容商把视觉接口放在 Responses API 上。
         try:
             response = client.responses.create(
-                model=model,
+                model=env.model,
                 input=[
                     {
                         "role": "user",
