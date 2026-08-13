@@ -1,0 +1,6 @@
+[server]
+# Hard ceiling applied before uploaded content reaches application code.
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false

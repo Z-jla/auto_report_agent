@@ -59,7 +59,7 @@ auto_report_agent/
 
 - Python `>=3.10,<3.14`
 - 支持任何遵循 OpenAI 协议的 API 服务，包括 OpenAI、Azure OpenAI、DeepSeek、Qwen、Kimi、智谱 GLM、Ollama、vLLM 等官方或自建服务，以及各类第三方聚合商
-- 如需联网搜索，服务商需要支持 Responses API 的 `web_search_preview` 工具
+- 如需联网搜索，服务商需要支持 Responses API 的 `web_search` 或兼容的 `web_search_preview` 工具
 - 如需图片识别，模型需要支持视觉输入
 
 ## 安装
@@ -109,16 +109,26 @@ LLM_MODEL=你的模型名
 LLM_VISION_MODEL=
 
 # chat：普通 Chat Completions
-# responses：Responses API，适合 web_search_preview
+# responses：Responses API，适合 Web Search
 LLM_API_MODE=chat
 
 # 是否启用兼容商 Web Search
 ENABLE_WEB_SEARCH=false
+
+# 公共部署安全模式；本机 Ollama/私网服务请改为 local
+APP_DEPLOYMENT_MODE=public
 ```
 
 > 兼容性：旧的 `OPENAI_API_KEY`、`OPENAI_API_BASE`、`OPENAI_MODEL_NAME`、`OPENAI_VISION_MODEL_NAME`、`OPENAI_API_MODE` 仍然可用（作为 fallback）。同时设置时，优先读取 `LLM_*`。
 
 > 注意：不要把 `.env` 提交到 GitHub。项目已经在 `.gitignore` 中忽略 `.env`。
+
+### 部署模式与上传限制
+
+- `APP_DEPLOYMENT_MODE=public`（默认安全策略）：页面不会预填服务器 `.env` 中的 Key，只允许 HTTPS 公网 API 地址，并禁用全局缓存清理。
+- `APP_DEPLOYMENT_MODE=local`：适合本机单用户使用，允许 `http://localhost`、Ollama、vLLM 等本地或私网接口。
+- 公共模式允许页面内置服务商域名，并叠加 `APP_ALLOWED_API_HOSTS` 中的自定义主机（支持 `*.example.com`）。访问私网接口需要同时设置主机白名单和 `APP_ALLOW_PRIVATE_API_HOSTS=true`，且只应在受信环境中开启。
+- 默认限制为：图片 10 MB、最多 5 篇文献、单篇 25 MB、合计 50 MB、PDF 200 页。可通过 `.env.example` 中的 `MAX_*` 变量调整，Streamlit 服务器还有 50 MB 的请求前置上限。
 
 ## 运行前端
 
@@ -151,10 +161,11 @@ auto-report-agent
 
 ## 输出文件
 
-默认输出：
+每次运行使用独立目录：
 
 ```text
-output/final_report.md
+output/runs/<run_id>/final_report.md
+output/runs/<run_id>/run.json
 ```
 
 前端支持下载：
@@ -163,14 +174,15 @@ output/final_report.md
 - `final_report.pdf`
 - `final_report.docx`
 
-这些生成文件默认不会被 Git 提交。
+这些生成文件默认不会被 Git 提交。Streamlit 只展示当前浏览器会话生成的历史报告，不读取其他会话的运行目录。
 
 ## 开发与测试
 
 ```bash
 pip install -e ".[dev]"
 ruff check .
-python -m compileall -q .
+ruff format --check .
+python -m compileall -q app.py src tests
 pytest -q
 ```
 
@@ -178,13 +190,15 @@ pytest -q
 
 - 不要提交 `.env`、API Key、日志、缓存和生成报告。
 - 如果误把 API Key 提交到远程仓库，请立刻撤销并重新生成 Key。
-- Streamlit 页面中的 API 配置只用于当前运行进程；`api_environment()` 会在任务结束后恢复环境变量，避免不同会话之间串用 Key。
+- 公共模式不会把服务器 Key 下发到浏览器；每次调用会先清空受管环境变量、串行应用当前会话配置，并在结束后恢复。
+- Base URL 会执行协议、主机、DNS 和私网地址校验；公共部署建议再设置主机白名单。
+- 每次报告写入独立运行目录；文献缓存按浏览器会话、模型、Base URL、接口模式、提示词版本和生成参数隔离。
 
 ## 常见问题
 
 ### 1. 为什么有的兼容服务不能联网搜索？
 
-普通 Chat Completions 只负责文本生成，不等于具备联网搜索。项目里的联网搜索依赖服务商是否支持 OpenAI Responses API 的 `web_search_preview` 工具。
+普通 Chat Completions 只负责文本生成，不等于具备联网搜索。项目优先使用 OpenAI Responses API 的 `web_search` 工具；对旧兼容商会回退到 `web_search_preview`。
 
 ### 2. PDF 和网页显示不完全一样怎么办？
 
@@ -192,7 +206,7 @@ pytest -q
 
 ### 3. 文献很多时为什么慢？
 
-文献分析会分阶段读取、摘要和合并，长文档会产生多次模型调用。可以通过 `.env` 中的 `PAPER_CHUNK_SIZE`、`PAPER_MAX_CHUNKS_PER_DOC` 等参数控制成本和速度。
+文献分析会分阶段读取、摘要和合并，长文档会产生多次模型调用。超过片段上限时会均匀选择首部、中部和尾部，并把覆盖比例写入综合材料；可以通过 `.env` 中的 `PAPER_CHUNK_SIZE`、`PAPER_MAX_CHUNKS_PER_DOC` 等参数控制成本和速度。
 
 ## License
 

@@ -1,22 +1,64 @@
 from __future__ import annotations
 
 import base64
+import os
 
 from openai import (
     APIConnectionError,
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
+    DefaultHttpxClient,
     NotFoundError,
     OpenAI,
     PermissionDeniedError,
     RateLimitError,
 )
 
-from auto_report_agent.api_config import resolve_llm_env
+from auto_report_agent.api_config import resolve_llm_env, validate_base_url
 from auto_report_agent.settings import initialize_runtime
 
 initialize_runtime()
+
+DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+SUPPORTED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+
+
+def validate_image_bytes(
+    image_bytes: bytes,
+    *,
+    mime_type: str,
+    max_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+) -> None:
+    if not image_bytes:
+        raise RuntimeError("图片内容为空。")
+    if len(image_bytes) > max_bytes:
+        raise ValueError(
+            f"图片约 {len(image_bytes) / 1024 / 1024:.1f} MB，"
+            f"超过上限 {max_bytes / 1024 / 1024:.1f} MB。"
+        )
+    normalized_mime = mime_type.lower().strip()
+    if normalized_mime not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise ValueError(f"不支持的图片 MIME 类型：{mime_type}")
+
+    signatures = {
+        "image/png": image_bytes.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": image_bytes.startswith(b"\xff\xd8\xff"),
+        "image/webp": image_bytes.startswith(b"RIFF")
+        and len(image_bytes) >= 12
+        and image_bytes[8:12] == b"WEBP",
+    }
+    if not signatures[normalized_mime]:
+        raise ValueError("图片内容与声明的 MIME 类型不一致。")
+
+
+def _configured_max_image_bytes() -> int:
+    raw = os.getenv("MAX_IMAGE_MB", "10").strip()
+    try:
+        megabytes = int(raw)
+    except ValueError:
+        megabytes = 10
+    return max(1, min(50, megabytes)) * 1024 * 1024
 
 
 def analyze_image_content(
@@ -39,11 +81,25 @@ def analyze_image_content(
         raise RuntimeError(
             "缺少视觉模型：请设置 LLM_VISION_MODEL 或 LLM_MODEL（或其 OPENAI_* 对应名）。"
         )
-    if not image_bytes:
-        raise RuntimeError("图片内容为空。")
+    validate_image_bytes(
+        image_bytes,
+        mime_type=mime_type,
+        max_bytes=_configured_max_image_bytes(),
+    )
+
+    try:
+        base_url = validate_base_url(env.base_url)
+    except ValueError as exc:
+        raise RuntimeError(f"Base URL 安全校验未通过：{exc}") from exc
 
     data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-    client = OpenAI(api_key=env.api_key, base_url=env.base_url)
+    client = OpenAI(
+        api_key=env.api_key,
+        base_url=base_url,
+        http_client=DefaultHttpxClient(follow_redirects=False),
+        timeout=90.0,
+        max_retries=1,
+    )
 
     prompt = f"""
 你是一个严谨的多模态信息分析助手。请识别用户上传图片中的内容，并输出结构化 Markdown。
@@ -55,7 +111,7 @@ def analyze_image_content(
 4. 后续任务建议：根据图片内容判断用户可能希望系统完成什么工作；
 5. 如果图片信息不足或不清晰，请明确说明。
 
-用户补充指令：{instruction or '无'}
+用户补充指令：{instruction or "无"}
 """.strip()
 
     try:
@@ -83,13 +139,10 @@ def analyze_image_content(
         ) from exc
     except (APIConnectionError, APITimeoutError) as exc:
         raise RuntimeError(
-            f"图片识别失败：网络连接异常（{exc.__class__.__name__}）。"
-            " 请检查网络或反向代理。"
+            f"图片识别失败：网络连接异常（{exc.__class__.__name__}）。 请检查网络或反向代理。"
         ) from exc
     except RateLimitError as exc:
-        raise RuntimeError(
-            "图片识别失败：触发限流（429）。请稍后重试或更换模型/账号。"
-        ) from exc
+        raise RuntimeError("图片识别失败：触发限流（429）。请稍后重试或更换模型/账号。") from exc
     except (BadRequestError, NotFoundError) as chat_error:
         # Chat Completions 拒绝请求或路径不存在，多半是兼容商把视觉接口放在 Responses API 上。
         try:
@@ -111,9 +164,7 @@ def analyze_image_content(
                 f"图片识别失败：API Key 鉴权未通过（{exc.__class__.__name__}）。"
             ) from exc
         except (APIConnectionError, APITimeoutError) as exc:
-            raise RuntimeError(
-                f"图片识别失败：网络连接异常（{exc.__class__.__name__}）。"
-            ) from exc
+            raise RuntimeError(f"图片识别失败：网络连接异常（{exc.__class__.__name__}）。") from exc
         except RateLimitError as exc:
             raise RuntimeError("图片识别失败：触发限流（429）。") from exc
         except (BadRequestError, NotFoundError) as responses_error:

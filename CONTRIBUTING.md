@@ -27,12 +27,14 @@ cp .env.example .env
 
 ## 本地验证
 
-提交前请至少跑通这三项：
+提交前请至少跑通以下验证：
 
 ```bash
 ruff check .
-python -m compileall -q .
+ruff format --check .
+python -m compileall -q app.py src tests
 pytest -q
+python -m build
 ```
 
 跑 Streamlit 前端：

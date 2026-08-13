@@ -6,12 +6,36 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = Path(__file__).resolve().parent
+SOURCE_ROOT = PACKAGE_ROOT.parents[1]
+
+
+def _default_app_home() -> Path:
+    """Return a writable application-data root.
+
+    Editable/source installs keep the historical repository-local layout. A wheel
+    install must not write next to ``site-packages``, so it falls back to the
+    platform application-data directory. ``AUTO_REPORT_HOME`` always wins.
+    """
+    configured = os.getenv("AUTO_REPORT_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    if (SOURCE_ROOT / "pyproject.toml").is_file():
+        return SOURCE_ROOT
+
+    if os.name == "nt":
+        base = Path(os.getenv("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return (base / "auto-report-agent").resolve()
+
+
+PROJECT_ROOT = _default_app_home()
 ROOT_DIR = PROJECT_ROOT
 ENV_FILE = PROJECT_ROOT / ".env"
 OUTPUT_DIR = PROJECT_ROOT / "output"
-OUTPUT_FILE = OUTPUT_DIR / "final_report.md"
-LAST_RUN_FILE = OUTPUT_DIR / "last_run.json"
+RUNS_DIR = OUTPUT_DIR / "runs"
 CREWAI_STORAGE_DIR = PROJECT_ROOT / ".crewai_storage"
 LOCALAPPDATA_DIR = PROJECT_ROOT / ".localappdata"
 
@@ -30,9 +54,8 @@ def force_utf8_stdio() -> None:
 
 
 def setup_local_crewai_paths() -> None:
-    """Keep CrewAI local cache/credential directories inside the project tree."""
+    """Keep CrewAI storage inside the application-data root."""
     os.environ.setdefault("CREWAI_STORAGE_DIR", str(CREWAI_STORAGE_DIR))
-    os.environ.setdefault("LOCALAPPDATA", str(LOCALAPPDATA_DIR))
 
 
 def load_environment() -> bool:
@@ -55,13 +78,14 @@ def normalize_llm_env() -> None:
     Users can set either LLM_API_KEY (recommended in docs) or OPENAI_API_KEY
     (what the openai SDK and CrewAI/LiteLLM actually read). We accept both and
     propagate in either direction so downstream libraries always see OPENAI_*.
-    If both are set, the explicit OPENAI_* value wins.
+    If both are set, the documented LLM_* value wins and is mirrored to every
+    compatibility alias so project code and downstream SDKs cannot diverge.
     """
     for friendly, legacy_names in _LLM_ALIASES.items():
         friendly_value = os.environ.get(friendly, "").strip()
         canonical = legacy_names[0]
         canonical_set = bool(os.environ.get(canonical, "").strip())
-        if friendly_value and not canonical_set:
+        if friendly_value:
             for name in legacy_names:
                 os.environ[name] = friendly_value
         elif canonical_set and not friendly_value:

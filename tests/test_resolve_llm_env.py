@@ -3,6 +3,7 @@ import os
 import pytest
 
 from auto_report_agent.api_config import resolve_llm_env
+from auto_report_agent.settings import normalize_llm_env
 
 
 @pytest.fixture
@@ -111,3 +112,17 @@ def test_resolve_enable_web_search_truthy_values(clean_llm_env):
     for falsy in ("0", "false", "no", "off", ""):
         os.environ["ENABLE_WEB_SEARCH"] = falsy
         assert resolve_llm_env().enable_web_search is False
+
+
+def test_normalize_llm_env_overwrites_all_openai_aliases(clean_llm_env):
+    clean_llm_env.setenv("LLM_API_KEY", "llm-key")
+    clean_llm_env.setenv("OPENAI_API_KEY", "stale-key")
+    clean_llm_env.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    clean_llm_env.setenv("OPENAI_API_BASE", "https://stale.example/v1")
+    clean_llm_env.setenv("OPENAI_BASE_URL", "https://other.example/v1")
+
+    normalize_llm_env()
+
+    assert os.environ["OPENAI_API_KEY"] == "llm-key"
+    assert os.environ["OPENAI_API_BASE"] == "https://llm.example/v1"
+    assert os.environ["OPENAI_BASE_URL"] == "https://llm.example/v1"

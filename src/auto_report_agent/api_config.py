@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,12 @@ PROVIDER_PRESETS: dict[str, ApiProviderPreset] = {
     ),
 }
 
+DEFAULT_PUBLIC_API_HOSTS = frozenset(
+    host
+    for preset in PROVIDER_PRESETS.values()
+    if preset.base_url and (host := urlsplit(preset.base_url).hostname)
+)
+
 
 API_ENV_KEYS = {
     "LLM_API_KEY",
@@ -81,6 +90,123 @@ API_ENV_KEYS = {
 
 
 _API_ENV_LOCK = threading.RLock()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def is_public_deployment() -> bool:
+    """Return whether the app should apply public/multi-user safety defaults."""
+    return os.getenv("APP_DEPLOYMENT_MODE", "public").strip().lower() != "local"
+
+
+def _is_disallowed_address(address: str) -> bool:
+    ip = ipaddress.ip_address(address)
+    return any(
+        (
+            not ip.is_global,
+            ip.is_private,
+            ip.is_loopback,
+            ip.is_link_local,
+            ip.is_multicast,
+            ip.is_reserved,
+            ip.is_unspecified,
+        )
+    )
+
+
+def _host_matches(host: str, patterns: set[str] | frozenset[str]) -> bool:
+    return any(
+        host == pattern
+        or (pattern.startswith("*.") and host.endswith(pattern[1:]) and host != pattern[2:])
+        for pattern in patterns
+    )
+
+
+def validate_base_url(
+    base_url: str,
+    *,
+    allow_private: bool | None = None,
+    resolve_dns: bool = True,
+) -> str:
+    """Validate an API root URL and reject common SSRF targets.
+
+    Private/local targets are allowed only in explicit local deployment mode or
+    when ``APP_ALLOW_PRIVATE_API_HOSTS=true`` is set. Public deployments require
+    HTTPS and resolve hostnames before a model request to block private addresses.
+    """
+    normalized = str(base_url or "").strip().rstrip("/")
+    if not normalized:
+        raise ValueError("Base URL 不能为空。")
+
+    try:
+        parsed = urlsplit(normalized)
+        host_value = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("Base URL 格式无效。") from exc
+    if parsed.scheme not in {"http", "https"} or not host_value:
+        raise ValueError("Base URL 必须是完整的 http(s) URL。")
+    if parsed.username or parsed.password:
+        raise ValueError("Base URL 不能包含用户名或密码。")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Base URL 不能包含查询参数或 URL 片段。")
+    try:
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Base URL 端口无效。") from exc
+
+    private_allowed = (
+        allow_private
+        if allow_private is not None
+        else (not is_public_deployment() or _env_bool("APP_ALLOW_PRIVATE_API_HOSTS"))
+    )
+    if not private_allowed and parsed.scheme != "https":
+        raise ValueError("公共部署只允许 HTTPS API 地址。")
+
+    host = host_value.rstrip(".").lower()
+    if not private_allowed and (host == "localhost" or host.endswith((".localhost", ".local"))):
+        raise ValueError("公共部署不允许访问本机或内网 API 地址。")
+
+    configured_hosts = {
+        value.strip().lower()
+        for value in os.getenv("APP_ALLOWED_API_HOSTS", "").split(",")
+        if value.strip()
+    }
+    if is_public_deployment() and allow_private is not True:
+        allowed_hosts = DEFAULT_PUBLIC_API_HOSTS | configured_hosts
+        if not _host_matches(host, allowed_hosts):
+            raise ValueError(
+                "公共部署只允许内置服务商或 APP_ALLOWED_API_HOSTS 明确列出的 API 主机。"
+            )
+    elif configured_hosts and not _host_matches(host, configured_hosts):
+        raise ValueError("该 API 主机不在 APP_ALLOWED_API_HOSTS 白名单中。")
+
+    if not private_allowed:
+        try:
+            literal = ipaddress.ip_address(host)
+        except ValueError:
+            literal = None
+        if literal is not None and _is_disallowed_address(str(literal)):
+            raise ValueError("公共部署不允许访问本机、私网或保留地址。")
+
+        if resolve_dns:
+            try:
+                addresses = {
+                    item[4][0]
+                    for item in socket.getaddrinfo(
+                        host, parsed_port or 443, type=socket.SOCK_STREAM
+                    )
+                }
+            except socket.gaierror as exc:
+                raise ValueError(f"无法解析 API 主机：{host}") from exc
+            if not addresses or any(_is_disallowed_address(address) for address in addresses):
+                raise ValueError("API 主机解析到了本机、私网或保留地址，已拒绝请求。")
+
+    return normalized
 
 
 def _first_env(*names: str) -> str:
@@ -155,16 +281,20 @@ def resolve_llm_env(*, prefer_vision_model: bool = False) -> ResolvedLLMConfig:
     )
 
 
-def default_api_config() -> dict[str, str | bool]:
+def default_api_config(*, include_server_values: bool = True) -> dict[str, str | bool]:
     resolved = resolve_llm_env()
     return {
-        "provider": os.getenv("API_PROVIDER_NAME", "自定义 OpenAI-compatible"),
-        "api_key": resolved.api_key,
-        "base_url": resolved.base_url,
-        "model": resolved.model,
-        "vision_model": resolved.vision_model,
-        "api_mode": resolved.api_mode,
-        "enable_web_search": resolved.enable_web_search,
+        "provider": (
+            os.getenv("API_PROVIDER_NAME", "自定义 OpenAI-compatible")
+            if include_server_values
+            else "自定义 OpenAI-compatible"
+        ),
+        "api_key": resolved.api_key if include_server_values else "",
+        "base_url": resolved.base_url if include_server_values else "",
+        "model": resolved.model if include_server_values else "",
+        "vision_model": resolved.vision_model if include_server_values else "",
+        "api_mode": resolved.api_mode if include_server_values else "chat",
+        "enable_web_search": resolved.enable_web_search if include_server_values else False,
     }
 
 
@@ -177,11 +307,17 @@ def apply_api_config(config: dict[str, str | bool]) -> None:
     users scripting against either name see consistent values.
     """
     api_key = str(config.get("api_key") or "").strip()
-    base_url = str(config.get("base_url") or "").strip().rstrip("/")
+    raw_base_url = str(config.get("base_url") or "").strip()
+    base_url = validate_base_url(raw_base_url) if raw_base_url else ""
     model = str(config.get("model") or "").strip()
     vision_model = str(config.get("vision_model") or "").strip()
     api_mode = str(config.get("api_mode") or "chat").strip().lower()
     enable_web_search = bool(config.get("enable_web_search"))
+
+    # Prevent an empty per-session value from inheriting another session's or
+    # the server process's credential/configuration.
+    for key in API_ENV_KEYS:
+        os.environ.pop(key, None)
 
     if api_key:
         os.environ["LLM_API_KEY"] = api_key
@@ -219,8 +355,8 @@ def api_environment(config: dict[str, str | bool]) -> Iterator[None]:
     """
     with _API_ENV_LOCK:
         previous = {key: os.environ.get(key) for key in API_ENV_KEYS}
-        apply_api_config(config)
         try:
+            apply_api_config(config)
             yield
         finally:
             for key, value in previous.items():

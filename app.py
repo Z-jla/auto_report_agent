@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import json
+import logging
 import os
 import re
+import secrets
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Literal
 
 import streamlit as st
 
-from auto_report_agent.settings import LAST_RUN_FILE, OUTPUT_FILE, initialize_runtime
+from auto_report_agent.settings import initialize_runtime
 
 initialize_runtime()
 
@@ -18,7 +19,9 @@ from auto_report_agent.api_config import (  # noqa: E402
     PROVIDER_PRESETS,
     api_environment,
     default_api_config,
+    is_public_deployment,
     redacted_api_summary,
+    validate_base_url,
 )
 from auto_report_agent.cache_manager import (  # noqa: E402
     clean_cache,
@@ -33,10 +36,17 @@ from auto_report_agent.document_ingest import (  # noqa: E402
 )
 from auto_report_agent.docx_export import markdown_to_docx_bytes  # noqa: E402
 from auto_report_agent.pdf_export import markdown_to_pdf_bytes  # noqa: E402
+from auto_report_agent.run_manager import (  # noqa: E402
+    RunPaths,
+    create_run_paths,
+    write_run_metadata,
+    write_text_atomic,
+)
 from auto_report_agent.staged_literature import summarize_documents_staged  # noqa: E402
-from auto_report_agent.vision import analyze_image_content  # noqa: E402
+from auto_report_agent.vision import analyze_image_content, validate_image_bytes  # noqa: E402
 
 ProgressCallback = Callable[[str], None]
+LOGGER = logging.getLogger(__name__)
 
 
 def _safe_short_text(value: Any, max_len: int = 160) -> str:
@@ -216,9 +226,7 @@ class EventTimeline:
 
     def log(self, message: str, *, icon: str = "•", detail: str = "") -> None:
         """便捷方法：以系统消息身份加入 timeline。"""
-        self.add(
-            AgentEvent(kind="system", title=message, detail=detail, icon=icon)
-        )
+        self.add(AgentEvent(kind="system", title=message, detail=detail, icon=icon))
 
     def finalize(self, *, success: bool) -> None:
         self.is_running = False
@@ -262,27 +270,28 @@ class EventTimeline:
         return f"{ev.icon} {ts}{agent_part}{ev.title}"
 
 
-def _read_last_run() -> dict[str, Any] | None:
-    if not LAST_RUN_FILE.exists():
-        return None
-    try:
-        return json.loads(LAST_RUN_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _write_last_run(meta: dict[str, Any]) -> None:
-    LAST_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LAST_RUN_FILE.write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name, "").strip().lower()
     if not raw:
         return default
     return raw not in {"0", "false", "no", "off", "禁用", "关闭"}
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _render_exception(exc: Exception) -> None:
+    if is_public_deployment():
+        LOGGER.exception("Public request failed", exc_info=exc)
+        st.caption(f"错误类型：{type(exc).__name__}。详细堆栈仅记录在服务器端。")
+    else:
+        st.exception(exc)
 
 
 def generate_report(
@@ -292,6 +301,7 @@ def generate_report(
     timeline: EventTimeline | None = None,
     paper_context: str = "",
     paper_instruction: str = "",
+    run_paths: RunPaths | None = None,
 ) -> str:
     """运行 CrewAI 工作流并返回最终报告文本。"""
     if timeline:
@@ -300,9 +310,11 @@ def generate_report(
         else:
             timeline.log("启动 CrewAI：按 研究 → 写作 → 审核 顺序执行。", icon="🚀")
 
+    paths = run_paths or create_run_paths()
     crew = AutoReportCrew().build_crew(mode=mode)
 
     if timeline is not None:
+
         def step_callback(output: Any) -> None:
             event = _parse_step_output(output)
             if event is not None:
@@ -314,10 +326,6 @@ def generate_report(
         crew.step_callback = step_callback
         crew.task_callback = task_callback
 
-    previous_report: str | None = (
-        OUTPUT_FILE.read_text(encoding="utf-8") if OUTPUT_FILE.exists() else None
-    )
-
     try:
         result = crew.kickoff(
             inputs={
@@ -325,20 +333,17 @@ def generate_report(
                 "paper_context": paper_context,
                 "paper_instruction": paper_instruction,
                 "mode": mode,
+                "output_file": paths.report_file.as_posix(),
             }
         )
     except Exception:
-        # 失败时，把可能被半写入的 final_report.md 恢复回上一次成功的内容，
-        # 避免页面把残留的中间产物当成"已有报告"展示给用户。
         keep_paper_draft = mode == "paper" and _env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True)
-        if keep_paper_draft and OUTPUT_FILE.exists():
+        if keep_paper_draft and paths.report_file.exists():
             if timeline:
                 timeline.log("生成过程失败，但已保留当前文献草稿用于下载/手动检查。", icon="📝")
-        elif previous_report is not None:
-            OUTPUT_FILE.write_text(previous_report, encoding="utf-8")
-        elif OUTPUT_FILE.exists():
+        elif paths.report_file.exists():
             try:
-                OUTPUT_FILE.unlink()
+                paths.report_file.unlink()
             except OSError:
                 pass
         raise
@@ -346,18 +351,20 @@ def generate_report(
     if timeline:
         timeline.log("CrewAI 执行完成：正在读取最终 Markdown 报告。", icon="📥")
 
-    if OUTPUT_FILE.exists():
-        report_text = OUTPUT_FILE.read_text(encoding="utf-8")
+    if paths.report_file.exists():
+        report_text = paths.report_file.read_text(encoding="utf-8")
     else:
         report_text = str(result)
+        write_text_atomic(paths.report_file, report_text)
 
-    _write_last_run(
+    write_run_metadata(
+        paths,
         {
             "topic": topic,
             "mode": mode,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "char_count": len(report_text),
-        }
+        },
     )
     return report_text
 
@@ -485,11 +492,15 @@ def render_cache_manager() -> None:
 def render_api_config_panel() -> dict[str, str | bool]:
     """Render session-only OpenAI-compatible API settings."""
     if "api_config" not in st.session_state:
-        st.session_state.api_config = default_api_config()
+        st.session_state.api_config = default_api_config(
+            include_server_values=not is_public_deployment()
+        )
 
     current = dict(st.session_state.api_config)
     st.subheader("API 配置")
-    st.caption("默认只保存在当前浏览器会话，不写入服务器 `.env`。适合部署后让访问者填写自己的 API。")
+    st.caption(
+        "配置只保存在当前浏览器会话，不写入服务器 `.env`。公共模式不会向页面下发服务器 Key。"
+    )
 
     provider_names = list(PROVIDER_PRESETS)
     current_provider = str(current.get("provider") or provider_names[0])
@@ -539,10 +550,10 @@ def render_api_config_panel() -> dict[str, str | bool]:
         ["chat", "responses"],
         index=1 if str(current.get("api_mode") or "chat") == "responses" else 0,
         horizontal=True,
-        help="Chat Completions 兼容性最好；Responses 可启用 web_search_preview，但只有部分服务商支持。",
+        help="Chat Completions 兼容性最好；Responses 可启用 Web Search，但只有部分服务商支持。",
     )
     enable_web_search = st.checkbox(
-        "启用 Responses web_search_preview 联网搜索",
+        "启用 Responses Web Search 联网搜索",
         value=bool(current.get("enable_web_search")) and api_mode == "responses",
         disabled=api_mode != "responses",
         help="仅 OpenAI 或明确支持 Responses 工具调用的兼容商可用；普通兼容商请关闭。",
@@ -559,7 +570,16 @@ def render_api_config_panel() -> dict[str, str | bool]:
     }
     st.session_state.api_config = config
 
-    if not config["api_key"] or not config["base_url"] or not config["model"]:
+    url_error = ""
+    if config["base_url"]:
+        try:
+            validate_base_url(str(config["base_url"]), resolve_dns=False)
+        except ValueError as exc:
+            url_error = str(exc)
+
+    if url_error:
+        st.error(url_error)
+    elif not config["api_key"] or not config["base_url"] or not config["model"]:
         st.warning("请至少填写 API Key、Base URL 和文本模型名。")
     else:
         st.success("当前会话 API 已生效。")
@@ -575,7 +595,9 @@ def main() -> None:
     )
 
     st.title("📑 Auto Report Agent")
-    st.caption("基于 CrewAI 的自动报告生成系统，支持主题研究报告、文献分析总结、图片识别、PDF/Word 导出和运行过程展示。")
+    st.caption(
+        "基于 CrewAI 的自动报告生成系统，支持主题研究报告、文献分析总结、图片识别、PDF/Word 导出和运行过程展示。"
+    )
 
     with st.sidebar:
         st.header("使用说明")
@@ -590,8 +612,10 @@ def main() -> None:
         )
         st.divider()
         st.info("模型调用：支持 OpenAI-compatible API，可在下方配置个人 API。")
-        st.info("联网搜索：仅在服务商支持 Responses API web_search_preview 时可用。")
-        st.info("文献解析：支持 PDF / DOCX / TXT / MD；文献会先分块阅读、阶段性摘要，再生成最终报告，减少长文献超时。")
+        st.info("联网搜索：优先使用 Responses API web_search，并兼容旧版 web_search_preview。")
+        st.info(
+            "文献解析：支持 PDF / DOCX / TXT / MD；文献会先分块阅读、阶段性摘要，再生成最终报告，减少长文献超时。"
+        )
         st.warning("部署给他人使用时，建议让用户在页面填写自己的 API，不要把公共 Key 写死。")
         st.caption("说明：页面展示的是可观察执行过程，不展示模型完整隐藏推理链。")
 
@@ -604,7 +628,13 @@ def main() -> None:
             help="开启后每个步骤可展开查看 Agent 思考、调用参数、工具返回；关闭则只显示一行摘要。",
         )
         st.divider()
-        render_cache_manager()
+        if is_public_deployment():
+            st.caption("公共部署模式已禁用全局缓存清理。")
+        else:
+            render_cache_manager()
+
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = secrets.token_hex(16)
 
     mode_label = st.radio(
         "选择任务模式",
@@ -614,6 +644,9 @@ def main() -> None:
     mode = "paper" if mode_label == "文献分析总结" else "topic"
 
     uploaded_image = None
+    uploaded_image_bytes: bytes | None = None
+    uploaded_image_mime = ""
+    image_upload_error = ""
     image_instruction = ""
     uploaded_papers: list[Any] = []
     paper_instruction = ""
@@ -630,7 +663,21 @@ def main() -> None:
         )
 
         if uploaded_image is not None:
-            st.image(uploaded_image, caption="已上传图片", use_container_width=True)
+            uploaded_image_bytes = uploaded_image.getvalue()
+            uploaded_image_mime = (uploaded_image.type or "").strip().lower()
+            if uploaded_image_mime == "image/jpg":
+                uploaded_image_mime = "image/jpeg"
+            try:
+                validate_image_bytes(
+                    uploaded_image_bytes,
+                    mime_type=uploaded_image_mime,
+                    max_bytes=_env_int("MAX_IMAGE_MB", 10, 1, 50) * 1024 * 1024,
+                )
+            except (RuntimeError, ValueError) as exc:
+                image_upload_error = str(exc)
+                st.error(f"图片上传校验失败：{image_upload_error}")
+            else:
+                st.image(uploaded_image_bytes, caption="已上传图片", use_container_width=True)
             image_instruction = st.text_area(
                 "针对图片的补充指令（可选）",
                 placeholder="例如：识别图中的论文标题并帮我找相关最新研究；或根据截图内容写一份分析报告。",
@@ -652,19 +699,31 @@ def main() -> None:
             accept_multiple_files=True,
             help="支持上传 PDF / DOCX / TXT / MD，可一次上传多篇。",
         )
-        st.caption("当前默认最多解析 5 篇文献；文献会按约 6000 字符切块，逐段摘要后再综合。可通过 .env 调整 PAPER_CHUNK_SIZE / PAPER_MAX_CHUNKS_PER_DOC。")
+        st.caption(
+            f"最多 {_env_int('MAX_DOCUMENTS', 5, 1, 20)} 篇；"
+            f"单文件上限 {_env_int('MAX_DOCUMENT_FILE_MB', 25, 1, 50)} MB；"
+            f"总上限 {_env_int('MAX_DOCUMENT_TOTAL_MB', 50, 1, 50)} MB。"
+            "超长文献会均匀覆盖开头、中部和结尾。"
+        )
 
     col1, _ = st.columns([1, 4])
     with col1:
         generate_clicked = st.button("生成报告", type="primary", use_container_width=True)
 
     if generate_clicked:
+        if image_upload_error:
+            st.error("请更换符合大小、格式和文件签名要求的图片后重试。")
+            return
         api_ready = all(
-            str(api_config.get(key) or "").strip()
-            for key in ("api_key", "base_url", "model")
+            str(api_config.get(key) or "").strip() for key in ("api_key", "base_url", "model")
         )
         if not api_ready:
             st.error("请先在左侧「API 配置」里填写 API Key、Base URL 和文本模型名。")
+            return
+        try:
+            validate_base_url(str(api_config["base_url"]))
+        except ValueError as exc:
+            st.error(f"API Base URL 不安全或不可用：{exc}")
             return
 
         if mode == "topic":
@@ -679,7 +738,6 @@ def main() -> None:
         timeline_container = st.container()
         timeline = EventTimeline(timeline_container, show_detail=show_detailed_thinking)
         timeline.log("收到任务，开始初始化。", icon="📨")
-
         paper_context = ""
         final_topic = topic.strip()
 
@@ -691,8 +749,8 @@ def main() -> None:
                     try:
                         with api_environment(api_config):
                             image_analysis = analyze_image_content(
-                                uploaded_image.getvalue(),
-                                mime_type=uploaded_image.type or "image/png",
+                                uploaded_image_bytes or b"",
+                                mime_type=uploaded_image_mime,
                                 instruction=image_instruction,
                             )
                         timeline.log("图片识别完成，准备把识别结果交给报告 Agent。", icon="✅")
@@ -700,7 +758,7 @@ def main() -> None:
                         timeline.log("图片识别失败。", icon="❌")
                         timeline.finalize(success=False)
                         st.error("图片识别失败，请检查模型是否支持视觉输入，或换用支持图片的模型。")
-                        st.exception(exc)
+                        _render_exception(exc)
                         return
 
                 with st.expander("查看图片识别结果", expanded=True):
@@ -714,13 +772,20 @@ def main() -> None:
             timeline.log("检测到文献输入，开始解析上传文件。", icon="📄")
             with st.spinner("正在解析文献内容..."):
                 try:
-                    max_chars_per_doc = max(
-                        20000,
-                        min(200000, int(os.getenv("PAPER_MAX_CHARS_PER_DOC", "120000"))),
-                    )
+                    max_documents = _env_int("MAX_DOCUMENTS", 5, 1, 20)
+                    max_file_bytes = _env_int("MAX_DOCUMENT_FILE_MB", 25, 1, 50) * 1024 * 1024
+                    max_total_bytes = _env_int("MAX_DOCUMENT_TOTAL_MB", 50, 1, 50) * 1024 * 1024
+                    max_chars_per_doc = _env_int("PAPER_MAX_CHARS_PER_DOC", 120000, 20000, 200000)
                     documents = parse_uploaded_documents(
                         uploaded_papers,
+                        max_docs=max_documents,
                         max_chars_per_doc=max_chars_per_doc,
+                        max_file_bytes=max_file_bytes,
+                        max_total_bytes=max_total_bytes,
+                        max_pdf_pages=_env_int("MAX_PDF_PAGES", 200, 1, 1000),
+                        max_docx_uncompressed_bytes=(
+                            _env_int("MAX_DOCX_UNCOMPRESSED_MB", 100, 1, 500) * 1024 * 1024
+                        ),
                     )
                     timeline.log(
                         f"已完成 {len(documents)} 篇文献解析，准备分阶段阅读。",
@@ -730,7 +795,7 @@ def main() -> None:
                     timeline.log("文献解析失败。", icon="❌")
                     timeline.finalize(success=False)
                     st.error("文献解析失败，请检查文件格式、文件内容或依赖是否安装完整。")
-                    st.exception(exc)
+                    _render_exception(exc)
                     return
 
             with st.expander("查看文献提取预览", expanded=False):
@@ -744,6 +809,7 @@ def main() -> None:
                             topic=final_topic,
                             instruction=paper_instruction,
                             progress=timeline.log,
+                            cache_namespace=str(st.session_state.session_id),
                         )
                     paper_context = staged_result.paper_context
                     timeline.log(
@@ -758,7 +824,7 @@ def main() -> None:
                         "分阶段文献阅读失败。通常是模型接口超时或 API 配置异常。"
                         "请稍后重试，或调小 PAPER_CHUNK_SIZE / PAPER_MAX_CHUNKS_PER_DOC。"
                     )
-                    st.exception(exc)
+                    _render_exception(exc)
                     return
 
             with st.expander("查看分阶段文献综合材料", expanded=False):
@@ -766,6 +832,7 @@ def main() -> None:
 
             timeline.log("文献阶段性摘要已整理完成，即将执行写作和审核。", icon="🧭")
             spinner_text = "Agent 正在基于阶段性摘要写作和审核，请稍等..."
+        run_paths = create_run_paths()
         with st.spinner(spinner_text):
             try:
                 with api_environment(api_config):
@@ -775,37 +842,38 @@ def main() -> None:
                         timeline=timeline,
                         paper_context=paper_context,
                         paper_instruction=paper_instruction,
+                        run_paths=run_paths,
                     )
             except Exception as exc:
                 timeline.log("报告生成失败。", icon="❌")
                 timeline.finalize(success=False)
                 st.error("报告生成失败，请检查 API Key、模型能力、网络连接或终端报错。")
-                st.exception(exc)
+                _render_exception(exc)
                 return
 
         timeline.log("最终报告已生成，可以预览和下载。", icon="🎉")
         timeline.finalize(success=True)
         st.success("报告生成完成！")
         st.subheader("最终报告")
+        st.session_state.last_report = {
+            "report": report,
+            "topic": final_topic,
+            "mode": mode,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "run_id": run_paths.run_id,
+        }
         render_download_buttons(report)
         st.markdown(report)
 
-    elif OUTPUT_FILE.exists():
-        existing_report = OUTPUT_FILE.read_text(encoding="utf-8")
-        meta = _read_last_run()
-        st.subheader("历史报告")
-        if meta:
-            mode_text = "文献分析" if meta.get("mode") == "paper" else "主题研究"
-            st.info(
-                f"以下是上一次生成的报告（{mode_text}），生成于 "
-                f"`{meta.get('generated_at', '未知时间')}`，主题：**{meta.get('topic', '未知主题')}**。"
-                " 如需新的报告，请在上方填写后点击「生成报告」。"
-            )
-        else:
-            st.warning(
-                "检测到 output/final_report.md，但找不到对应的运行元数据。"
-                "这可能是早期版本生成、手动放入或历史残留的文件，请谨慎核对内容。"
-            )
+    elif "last_report" in st.session_state:
+        meta = st.session_state.last_report
+        existing_report = str(meta["report"])
+        st.subheader("本会话历史报告")
+        mode_text = "文献分析" if meta.get("mode") == "paper" else "主题研究"
+        st.info(
+            f"以下是当前浏览器会话上一次生成的报告（{mode_text}），生成于 "
+            f"`{meta.get('generated_at', '未知时间')}`，运行 ID：`{meta.get('run_id', '未知')}`。"
+        )
         render_download_buttons(existing_report, prefix="历史")
         st.markdown(existing_report)
 

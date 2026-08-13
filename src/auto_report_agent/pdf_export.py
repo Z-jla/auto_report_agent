@@ -32,9 +32,7 @@ def markdown_to_pdf_bytes(markdown_text: str, title: str = "Auto Report") -> byt
             TableStyle,
         )
     except ImportError as exc:  # pragma: no cover - used by Streamlit runtime message
-        raise RuntimeError(
-            "缺少 PDF 导出依赖 reportlab，请先运行：pip install -e ."
-        ) from exc
+        raise RuntimeError("缺少 PDF 导出依赖 reportlab，请先运行：pip install -e .") from exc
 
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 

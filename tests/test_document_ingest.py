@@ -1,3 +1,5 @@
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,7 @@ from auto_report_agent.document_ingest import (
     build_paper_preview,
     extract_text_from_bytes,
     parse_document_paths,
+    parse_uploaded_documents,
 )
 
 
@@ -42,15 +45,15 @@ def test_extract_text_empty_file_raises():
         extract_text_from_bytes("empty.txt", b"   \n\n   ")
 
 
-def test_parse_document_paths_enforces_max_docs(tmp_path: Path):
+def test_parse_document_paths_rejects_too_many_docs(tmp_path: Path):
     paths = []
     for i in range(DEFAULT_MAX_DOCS + 3):
         p = tmp_path / f"doc_{i}.txt"
         p.write_text(f"content {i}", encoding="utf-8")
         paths.append(str(p))
 
-    documents = parse_document_paths(paths)
-    assert len(documents) == DEFAULT_MAX_DOCS
+    with pytest.raises(ValueError, match="最多允许读取"):
+        parse_document_paths(paths)
 
 
 def test_parse_document_paths_truncates_long_docs(tmp_path: Path):
@@ -62,7 +65,46 @@ def test_parse_document_paths_truncates_long_docs(tmp_path: Path):
 
     assert doc.truncated is True
     assert doc.original_chars > doc.extracted_chars
-    assert "[内容过长" in doc.content
+    assert "文档中部采样" in doc.content
+    assert len(doc.content) <= 100
+
+
+def test_parse_document_paths_rejects_large_file(tmp_path: Path):
+    path = tmp_path / "large.txt"
+    path.write_bytes(b"x" * 11)
+
+    with pytest.raises(ValueError, match="单文件"):
+        parse_document_paths([str(path)], max_file_bytes=10)
+
+
+class _UploadedFile:
+    def __init__(self, name: str, data: bytes, *, declared_size: int | None = None):
+        self.name = name
+        self._data = data
+        self.size = len(data) if declared_size is None else declared_size
+        self.read = False
+
+    def getvalue(self) -> bytes:
+        self.read = True
+        return self._data
+
+
+def test_uploaded_file_size_checked_before_reading():
+    uploaded = _UploadedFile("too-large.txt", b"small", declared_size=100)
+
+    with pytest.raises(ValueError, match="单文件"):
+        parse_uploaded_documents([uploaded], max_file_bytes=10)
+
+    assert uploaded.read is False
+
+
+def test_parse_uploaded_documents_rejects_too_many_before_reading():
+    uploads = [_UploadedFile(f"{index}.txt", b"x") for index in range(3)]
+
+    with pytest.raises(ValueError, match="最多允许上传"):
+        parse_uploaded_documents(uploads, max_docs=2)
+
+    assert not any(upload.read for upload in uploads)
 
 
 def test_parse_document_paths_missing_file(tmp_path: Path):
@@ -92,3 +134,33 @@ def test_build_paper_context_and_preview(tmp_path: Path):
 def test_parse_document_paths_empty_list():
     with pytest.raises(ValueError, match="没有解析到"):
         parse_document_paths([])
+
+
+def test_pdf_page_limit_checked_before_extraction(monkeypatch):
+    class _Reader:
+        is_encrypted = False
+        pages = [object(), object(), object()]
+
+        def __init__(self, stream):
+            pass
+
+    monkeypatch.setattr(
+        "auto_report_agent.document_ingest._get_pdf_reader_class",
+        lambda: _Reader,
+    )
+
+    with pytest.raises(ValueError, match="超过上限 2 页"):
+        extract_text_from_bytes("paper.pdf", b"pdf", max_pdf_pages=2)
+
+
+def test_docx_rejects_suspicious_compression_ratio():
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", "A" * 100_000)
+
+    with pytest.raises(ValueError, match="压缩比"):
+        extract_text_from_bytes(
+            "paper.docx",
+            payload.getvalue(),
+            max_docx_compression_ratio=2.0,
+        )

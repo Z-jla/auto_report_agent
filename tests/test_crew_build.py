@@ -43,3 +43,22 @@ def test_paper_mode_full_runs_analysis_pipeline(llm_env, monkeypatch):
 def test_unknown_mode_falls_back_to_topic(llm_env):
     crew = AutoReportCrew().build_crew(mode="nonsense")
     assert len(crew.tasks) == 3
+
+
+@pytest.mark.parametrize("mode", ["topic", "paper"])
+def test_final_task_interpolates_isolated_output_path(llm_env, monkeypatch, mode):
+    monkeypatch.setenv("PAPER_CREW_MODE", "fast")
+    crew = AutoReportCrew().build_crew(mode=mode)
+    output_file = "output/runs/safe_run_123/final_report.md"
+
+    crew._interpolate_inputs(
+        {
+            "topic": "topic",
+            "paper_context": "context",
+            "paper_instruction": "instruction",
+            "mode": mode,
+            "output_file": output_file,
+        }
+    )
+
+    assert crew.tasks[-1].output_file == output_file

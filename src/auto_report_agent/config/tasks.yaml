@@ -2,7 +2,7 @@ research_task:
   description: >
     围绕主题「{topic}」进行系统性资料研究。
     必须严格遵循以下要求：
-    1. 优先使用 web_search、browse_page 等工具搜索 2024-2026 年最新信息
+    1. 优先使用 openai_web_search 工具搜索截至报告生成时的最新信息，重点覆盖最近三年
     2. 优先级顺序：政府报告/学术论文/上市公司官方 > 权威媒体/智库 > 行业报告 > 普通文章
     3. 总结核心趋势、提取关键数据、观点和真实案例
     4. 每条信息必须标注：来源标题、发布时间、URL、可信度评级（高/中/低）
@@ -58,7 +58,8 @@ review_task:
   context:
     - research_task
     - writing_task
-  output_file: output/final_report.md
+  output_file: "{output_file}"
+  create_directory: true
 
 paper_analysis_task:
   description: >
@@ -128,7 +129,8 @@ paper_review_task:
   context:
     - paper_analysis_task
     - paper_writing_task
-  output_file: output/final_report.md
+  output_file: "{output_file}"
+  create_directory: true
 
 paper_direct_writing_task:
   description: >
@@ -155,7 +157,8 @@ paper_direct_writing_task:
     - 参考文献/依据
     - 待核实或材料不足之处
   agent: writer
-  output_file: output/final_report.md
+  output_file: "{output_file}"
+  create_directory: true
 
 paper_direct_review_task:
   description: >
@@ -176,4 +179,5 @@ paper_direct_review_task:
   agent: reviewer
   context:
     - paper_direct_writing_task
-  output_file: output/final_report.md
+  output_file: "{output_file}"
+  create_directory: true

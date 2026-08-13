@@ -9,6 +9,7 @@ from auto_report_agent.settings import (
     LOCALAPPDATA_DIR,
     OUTPUT_DIR,
     PROJECT_ROOT,
+    RUNS_DIR,
 )
 
 
@@ -78,6 +79,12 @@ def cache_targets() -> list[CacheTarget]:
             path=PROJECT_ROOT / ".tmp",
             description="临时文件目录。通常可安全清理。",
             default_selected=True,
+        ),
+        CacheTarget(
+            key="generated_runs",
+            label="独立运行报告",
+            path=RUNS_DIR,
+            description="每次生成任务的独立报告与元数据。清理后无法从服务器恢复。",
         ),
         CacheTarget(
             key="generated_outputs",
@@ -218,7 +225,16 @@ def clean_cache(keys: set[str]) -> list[CacheCleanResult]:
     for key in keys:
         target = targets.get(key)
         if target is None:
-            results.append(CacheCleanResult(key=key, label=key, deleted_bytes=0, deleted_files=0, deleted_dirs=0, error="未知缓存类别"))
+            results.append(
+                CacheCleanResult(
+                    key=key,
+                    label=key,
+                    deleted_bytes=0,
+                    deleted_files=0,
+                    deleted_dirs=0,
+                    error="未知缓存类别",
+                )
+            )
             continue
 
         before = scan_cache_target(target)

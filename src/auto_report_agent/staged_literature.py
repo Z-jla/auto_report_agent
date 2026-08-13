@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import time
 import urllib.error
 import urllib.request
@@ -11,13 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from auto_report_agent.api_config import resolve_llm_env
+from auto_report_agent.api_config import resolve_llm_env, validate_base_url
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
 from auto_report_agent.settings import OUTPUT_DIR, initialize_runtime
 
 ProgressCallback = Callable[[str], None]
-CACHE_VERSION = "staged-literature-v2"
+CACHE_VERSION = "staged-literature-v4"
+PROMPT_VERSION = "literature-prompts-2026-08-13-v2"
 initialize_runtime()
 CACHE_DIR = OUTPUT_DIR / "literature_cache"
 
@@ -57,9 +59,14 @@ def _safe_filename(name: str, max_len: int = 80) -> str:
     return (safe or "document")[:max_len]
 
 
-def _cache_root_for_document(document: ParsedDocument) -> Path:
+def _cache_namespace_root(cache_namespace: str) -> Path:
+    namespace_hash = _hash_text(cache_namespace or "shared", 16)
+    return CACHE_DIR / "namespaces" / namespace_hash
+
+
+def _cache_root_for_document(document: ParsedDocument, *, cache_namespace: str) -> Path:
     doc_hash = _hash_text(f"{CACHE_VERSION}\n{document.name}\n{document.content}", 16)
-    return CACHE_DIR / f"{_safe_filename(document.name)}_{doc_hash}"
+    return _cache_namespace_root(cache_namespace) / f"{_safe_filename(document.name)}_{doc_hash}"
 
 
 def _read_cache(path: Path) -> str | None:
@@ -78,9 +85,13 @@ def _write_cache(path: Path, content: str) -> None:
     if not _get_bool_env("PAPER_CACHE_ENABLED", True):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(content, encoding="utf-8")
-    temp_path.replace(path)
+    temp_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def _chunk_cache_path(
@@ -91,6 +102,8 @@ def _chunk_cache_path(
     chunk_index: int,
     total_chunks: int,
     chunk_text: str,
+    cache_namespace: str,
+    cache_identity: dict[str, object],
 ) -> Path:
     key = _hash_text(
         json.dumps(
@@ -103,13 +116,18 @@ def _chunk_cache_path(
                 "chunk_index": chunk_index,
                 "total_chunks": total_chunks,
                 "chunk_text": chunk_text,
+                "runtime": cache_identity,
             },
             ensure_ascii=False,
             sort_keys=True,
         ),
         20,
     )
-    return _cache_root_for_document(document) / "chunks" / f"chunk_{chunk_index:03d}_{key}.md"
+    return (
+        _cache_root_for_document(document, cache_namespace=cache_namespace)
+        / "chunks"
+        / f"chunk_{chunk_index:03d}_{key}.md"
+    )
 
 
 def _doc_summary_cache_path(
@@ -118,6 +136,8 @@ def _doc_summary_cache_path(
     topic: str,
     instruction: str,
     chunk_summaries: Sequence[str],
+    cache_namespace: str,
+    cache_identity: dict[str, object],
 ) -> Path:
     key = _hash_text(
         json.dumps(
@@ -128,13 +148,17 @@ def _doc_summary_cache_path(
                 "topic": topic,
                 "instruction": instruction,
                 "chunk_summaries": list(chunk_summaries),
+                "runtime": cache_identity,
             },
             ensure_ascii=False,
             sort_keys=True,
         ),
         20,
     )
-    return _cache_root_for_document(document) / f"doc_summary_{key}.md"
+    return (
+        _cache_root_for_document(document, cache_namespace=cache_namespace)
+        / f"doc_summary_{key}.md"
+    )
 
 
 def _corpus_summary_cache_path(
@@ -142,6 +166,8 @@ def _corpus_summary_cache_path(
     topic: str,
     instruction: str,
     doc_summaries: Sequence[tuple[str, str]],
+    cache_namespace: str,
+    cache_identity: dict[str, object],
 ) -> Path:
     key = _hash_text(
         json.dumps(
@@ -151,13 +177,14 @@ def _corpus_summary_cache_path(
                 "topic": topic,
                 "instruction": instruction,
                 "doc_summaries": list(doc_summaries),
+                "runtime": cache_identity,
             },
             ensure_ascii=False,
             sort_keys=True,
         ),
         20,
     )
-    return CACHE_DIR / "corpus" / f"corpus_summary_{key}.md"
+    return _cache_namespace_root(cache_namespace) / "corpus" / f"corpus_summary_{key}.md"
 
 
 def split_text_into_chunks(text: str, chunk_size: int) -> list[str]:
@@ -194,6 +221,55 @@ def split_text_into_chunks(text: str, chunk_size: int) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def select_chunk_coverage(chunks: Sequence[str], max_chunks: int) -> list[tuple[int, str]]:
+    """Select evenly distributed chunks and retain their original 1-based positions."""
+    if max_chunks < 1:
+        raise ValueError("max_chunks 必须至少为 1。")
+    if len(chunks) <= max_chunks:
+        return list(enumerate(chunks, start=1))
+    if max_chunks == 1:
+        return [(1, chunks[0])]
+
+    indices = [round(index * (len(chunks) - 1) / (max_chunks - 1)) for index in range(max_chunks)]
+    return [(index + 1, chunks[index]) for index in indices]
+
+
+def chunk_character_ranges(text: str, chunks: Sequence[str]) -> list[tuple[int, int]]:
+    """Return best-effort, 1-based inclusive character ranges for sequential chunks."""
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for chunk in chunks:
+        start = text.find(chunk, cursor)
+        if start < 0:
+            start = min(cursor, len(text))
+        end = min(len(text), start + len(chunk))
+        ranges.append((start + 1, max(start + 1, end)))
+        cursor = end
+    return ranges
+
+
+def _runtime_cache_identity(
+    *,
+    chunk_size: int,
+    max_chunks_per_doc: int,
+    max_output_tokens: int,
+    merge_output_tokens: int,
+) -> dict[str, object]:
+    env = resolve_llm_env()
+    return {
+        "cache_version": CACHE_VERSION,
+        "prompt_version": PROMPT_VERSION,
+        "base_url": env.base_url,
+        "model": env.model,
+        "api_mode": env.api_mode,
+        "chunk_size": chunk_size,
+        "max_chunks_per_doc": max_chunks_per_doc,
+        "max_output_tokens": max_output_tokens,
+        "merge_output_tokens": merge_output_tokens,
+        "temperature": 0.2,
+    }
+
+
 def _extract_response_text(data: dict) -> str:
     text = OpenAIWebSearchTool._extract_response_text(data)
     if text:
@@ -222,8 +298,13 @@ def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: i
     if not env.model:
         raise RuntimeError("缺少 LLM_MODEL（或 OPENAI_MODEL_NAME），无法进行分阶段文献分析。")
 
+    try:
+        base_url = validate_base_url(env.base_url)
+    except ValueError as exc:
+        raise RuntimeError(f"Base URL 安全校验未通过：{exc}") from exc
+
     if env.api_mode == "responses":
-        endpoint = f"{env.base_url}/responses"
+        endpoint = f"{base_url}/responses"
         payload = {
             "model": env.model,
             "input": prompt,
@@ -231,7 +312,7 @@ def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: i
             "max_output_tokens": max_output_tokens,
         }
     else:
-        endpoint = f"{env.base_url}/chat/completions"
+        endpoint = f"{base_url}/chat/completions"
         payload = {
             "model": env.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -243,7 +324,7 @@ def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: i
         "Authorization": f"Bearer {env.api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "auto-report-agent/0.1 staged-literature",
+        "User-Agent": "auto-report-agent/0.2 staged-literature",
     }
 
     last_error: Exception | None = None
@@ -255,7 +336,8 @@ def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: i
             headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            opener = urllib.request.build_opener(_NoRedirectHandler())
+            with opener.open(request, timeout=timeout) as response:
                 raw = response.read().decode("utf-8", errors="replace")
             parsed = json.loads(raw)
             text = _extract_response_text(parsed)
@@ -274,6 +356,11 @@ def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: i
     raise RuntimeError(f"分阶段文献分析调用模型失败：{type(last_error).__name__}: {last_error}")
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _chunk_prompt(
     *,
     topic: str,
@@ -281,15 +368,18 @@ def _chunk_prompt(
     document_name: str,
     chunk_index: int,
     total_chunks: int,
+    char_start: int,
+    char_end: int,
     chunk_text: str,
 ) -> str:
     return f"""
 你是严谨的学术文献阅读助手。请只基于下面这一段文献内容做局部摘要，不要编造文中没有的信息。
 
-文献主题/综述方向：{topic or '未指定'}
-用户补充要求：{instruction or '无'}
+文献主题/综述方向：{topic or "未指定"}
+用户补充要求：{instruction or "无"}
 文献文件：{document_name}
 当前片段：第 {chunk_index}/{total_chunks} 段
+提供文本字符范围：{char_start}-{char_end}
 
 请输出 Markdown，包含：
 1. 本片段核心内容
@@ -306,15 +396,17 @@ def _chunk_prompt(
 """.strip()
 
 
-def _doc_merge_prompt(*, topic: str, instruction: str, document_name: str, chunk_summaries: Sequence[str]) -> str:
+def _doc_merge_prompt(
+    *, topic: str, instruction: str, document_name: str, chunk_summaries: Sequence[str]
+) -> str:
     joined = "\n\n".join(
         f"## 片段摘要 {index}\n{summary}" for index, summary in enumerate(chunk_summaries, start=1)
     )
     return f"""
 你是学术文献分析专家。下面是同一篇文献的多个片段摘要。请合并为一份“单篇文献结构化摘要”。
 
-文献主题/综述方向：{topic or '未指定'}
-用户补充要求：{instruction or '无'}
+文献主题/综述方向：{topic or "未指定"}
+用户补充要求：{instruction or "无"}
 文献文件：{document_name}
 
 请输出 Markdown，必须包含：
@@ -335,15 +427,18 @@ def _doc_merge_prompt(*, topic: str, instruction: str, document_name: str, chunk
 """.strip()
 
 
-def _corpus_merge_prompt(*, topic: str, instruction: str, doc_summaries: Sequence[tuple[str, str]]) -> str:
+def _corpus_merge_prompt(
+    *, topic: str, instruction: str, doc_summaries: Sequence[tuple[str, str]]
+) -> str:
     joined = "\n\n".join(
-        f"## 文献 {index}：{name}\n{summary}" for index, (name, summary) in enumerate(doc_summaries, start=1)
+        f"## 文献 {index}：{name}\n{summary}"
+        for index, (name, summary) in enumerate(doc_summaries, start=1)
     )
     return f"""
 你是中文文献综述助手。下面是多篇文献的单篇结构化摘要。请生成给后续写作 Agent 使用的“综合文献分析材料”。
 
-文献主题/综述方向：{topic or '未指定'}
-用户补充要求：{instruction or '无'}
+文献主题/综述方向：{topic or "未指定"}
+用户补充要求：{instruction or "无"}
 
 请输出 Markdown，必须包含：
 1. 文献总体概览
@@ -368,59 +463,104 @@ def summarize_documents_staged(
     topic: str,
     instruction: str,
     progress: ProgressCallback | None = None,
+    cache_namespace: str = "shared",
 ) -> StagedLiteratureResult:
     """分块阅读文献，生成压缩后的综合文献上下文。"""
     chunk_size = _get_int_env("PAPER_CHUNK_SIZE", 6000, 2000, 12000)
-    max_chunks_per_doc = _get_int_env("PAPER_MAX_CHUNKS_PER_DOC", 10, 1, 30)
+    max_chunks_per_doc = _get_int_env("PAPER_MAX_CHUNKS_PER_DOC", 10, 3, 30)
     max_output_tokens = _get_int_env("PAPER_STAGE_MAX_OUTPUT_TOKENS", 900, 300, 2000)
     merge_output_tokens = _get_int_env("PAPER_STAGE_MERGE_TOKENS", 1400, 500, 3000)
     timeout = _get_int_env("PAPER_STAGE_TIMEOUT", 90, 20, 180)
     retries = _get_int_env("PAPER_STAGE_RETRIES", 1, 0, 3)
+    cache_identity = _runtime_cache_identity(
+        chunk_size=chunk_size,
+        max_chunks_per_doc=max_chunks_per_doc,
+        max_output_tokens=max_output_tokens,
+        merge_output_tokens=merge_output_tokens,
+    )
 
     doc_summaries: list[tuple[str, str]] = []
     total_chunk_count = 0
 
     for doc_index, document in enumerate(documents, start=1):
-        chunks = split_text_into_chunks(document.content, chunk_size)
-        if len(chunks) > max_chunks_per_doc:
-            chunks = chunks[:max_chunks_per_doc]
-            truncated_note = f"（原文切出更多片段，已按上限只分析前 {max_chunks_per_doc} 段）"
-        else:
-            truncated_note = ""
+        all_chunks = split_text_into_chunks(document.content, chunk_size)
+        if not all_chunks:
+            raise ValueError(f"文献 {document.name} 没有可分析的文本片段。")
+        all_ranges = chunk_character_ranges(document.content, all_chunks)
+        selected_chunks = select_chunk_coverage(all_chunks, max_chunks_per_doc)
+        selected_indices = [index for index, _ in selected_chunks]
+        selected_ranges = [all_ranges[index - 1] for index in selected_indices]
+        selected_chars = sum(end - start + 1 for start, end in selected_ranges)
+        provided_coverage = selected_chars / max(len(document.content), 1) * 100
+        source_coverage = selected_chars / max(document.original_chars, 1) * 100
+        source_scope = (
+            f"解析得到 {document.original_chars} 字符；因长度上限已按首/中/尾采样后提供 "
+            f"{document.extracted_chars} 字符。"
+            if document.truncated
+            else f"解析并提供 {document.original_chars} 字符。"
+        )
+        coverage_note = (
+            f"> 覆盖说明：{source_scope}提供文本共切分为 {len(all_chunks)} 个片段，本次分析 "
+            f"{len(selected_chunks)} 个；按字符约覆盖提供文本的 {provided_coverage:.0f}%"
+            f"（约占解析文本的 {source_coverage:.0f}%）。选中范围："
+            + "、".join(
+                f"片段 {index}（字符 {start}-{end}）"
+                for index, (start, end) in zip(selected_indices, selected_ranges, strict=True)
+            )
+            + "。"
+        )
+        selection_note = ""
+        if len(selected_chunks) < len(all_chunks):
+            selection_note = "（已均匀覆盖开头、中部和结尾）"
 
         if progress:
             progress(
                 f"开始分阶段阅读第 {doc_index}/{len(documents)} 篇文献：{document.name}，"
-                f"共 {len(chunks)} 个片段{truncated_note}。"
+                f"原文共 {len(all_chunks)} 个片段，本次分析 {len(selected_chunks)} 个"
+                f"{selection_note}。"
             )
 
         chunk_summaries: list[str] = []
-        for chunk_index, chunk in enumerate(chunks, start=1):
+        for selected_position, (chunk_index, chunk) in enumerate(selected_chunks, start=1):
+            char_start, char_end = all_ranges[chunk_index - 1]
             chunk_cache_path = _chunk_cache_path(
                 document=document,
                 topic=topic,
                 instruction=instruction,
                 chunk_index=chunk_index,
-                total_chunks=len(chunks),
+                total_chunks=len(all_chunks),
                 chunk_text=chunk,
+                cache_namespace=cache_namespace,
+                cache_identity=cache_identity,
             )
             cached_summary = _read_cache(chunk_cache_path)
             if cached_summary:
                 if progress:
-                    progress(f"命中缓存：《{document.name}》第 {chunk_index}/{len(chunks)} 个片段已完成，跳过模型调用。")
-                chunk_summaries.append(cached_summary)
+                    progress(
+                        f"命中缓存：《{document.name}》原始片段 {chunk_index}/{len(all_chunks)} "
+                        "已完成，跳过模型调用。"
+                    )
+                chunk_summaries.append(
+                    f"> 覆盖片段：原始分块 {chunk_index}/{len(all_chunks)}，"
+                    f"提供文本字符 {char_start}-{char_end}\n\n{cached_summary}"
+                )
                 total_chunk_count += 1
                 continue
 
             if progress:
-                progress(f"正在分析《{document.name}》第 {chunk_index}/{len(chunks)} 个片段。")
+                progress(
+                    f"正在分析《{document.name}》选中片段 {selected_position}/{len(selected_chunks)}"
+                    f"（原始分块 {chunk_index}/{len(all_chunks)}）。"
+                )
             summary = _call_model(
                 _chunk_prompt(
                     topic=topic,
                     instruction=instruction,
                     document_name=document.name,
                     chunk_index=chunk_index,
-                    total_chunks=len(chunks),
+                    total_chunks=len(all_chunks),
+                    char_start=char_start,
+                    char_end=char_end,
                     chunk_text=chunk,
                 ),
                 max_output_tokens=max_output_tokens,
@@ -428,7 +568,10 @@ def summarize_documents_staged(
                 retries=retries,
             )
             _write_cache(chunk_cache_path, summary)
-            chunk_summaries.append(summary)
+            chunk_summaries.append(
+                f"> 覆盖片段：原始分块 {chunk_index}/{len(all_chunks)}，"
+                f"提供文本字符 {char_start}-{char_end}\n\n{summary}"
+            )
             total_chunk_count += 1
 
         doc_cache_path = _doc_summary_cache_path(
@@ -436,6 +579,8 @@ def summarize_documents_staged(
             topic=topic,
             instruction=instruction,
             chunk_summaries=chunk_summaries,
+            cache_namespace=cache_namespace,
+            cache_identity=cache_identity,
         )
         cached_doc_summary = _read_cache(doc_cache_path)
         if cached_doc_summary:
@@ -445,6 +590,7 @@ def summarize_documents_staged(
         else:
             if progress:
                 progress(f"正在合并《{document.name}》的 {len(chunk_summaries)} 个片段摘要。")
+            doc_summary_cacheable = True
             try:
                 doc_summary = _call_model(
                     _doc_merge_prompt(
@@ -458,6 +604,7 @@ def summarize_documents_staged(
                     retries=retries,
                 )
             except Exception as exc:
+                doc_summary_cacheable = False
                 fallback_enabled = _get_bool_env("PAPER_FALLBACK_ON_MERGE_TIMEOUT", True)
                 if not fallback_enabled:
                     raise
@@ -473,11 +620,12 @@ def summarize_documents_staged(
                 doc_summary = (
                     f"# 单篇文献临时摘要：{document.name}\n\n"
                     f"> 自动合并步骤失败，以下内容由已成功缓存的片段摘要拼接而成。"
-                    f"失败原因：{type(exc).__name__}: {exc}\n\n"
+                    f"失败类型：{type(exc).__name__}\n\n"
                     f"{joined}"
                 )
-            _write_cache(doc_cache_path, doc_summary)
-        doc_summaries.append((document.name, doc_summary))
+            if doc_summary_cacheable:
+                _write_cache(doc_cache_path, doc_summary)
+        doc_summaries.append((document.name, f"{coverage_note}\n\n{doc_summary}"))
 
     if progress:
         progress(f"正在合并 {len(doc_summaries)} 篇文献的综合分析材料。")
@@ -490,6 +638,8 @@ def summarize_documents_staged(
             topic=topic,
             instruction=instruction,
             doc_summaries=doc_summaries,
+            cache_namespace=cache_namespace,
+            cache_identity=cache_identity,
         )
         cached_corpus_summary = _read_cache(corpus_cache_path)
         if cached_corpus_summary:
@@ -497,6 +647,7 @@ def summarize_documents_staged(
                 progress("命中缓存：多篇文献综合分析材料已存在，跳过模型调用。")
             final_context = cached_corpus_summary
         else:
+            corpus_summary_cacheable = True
             try:
                 final_context = _call_model(
                     _corpus_merge_prompt(
@@ -509,6 +660,7 @@ def summarize_documents_staged(
                     retries=retries,
                 )
             except Exception as exc:
+                corpus_summary_cacheable = False
                 fallback_enabled = _get_bool_env("PAPER_FALLBACK_ON_MERGE_TIMEOUT", True)
                 if not fallback_enabled:
                     raise
@@ -521,10 +673,11 @@ def summarize_documents_staged(
                 final_context = (
                     "# 多篇文献临时综合材料\n\n"
                     f"> 自动综合步骤失败，以下内容由已成功缓存的单篇摘要拼接而成。"
-                    f"失败原因：{type(exc).__name__}: {exc}\n\n"
+                    f"失败类型：{type(exc).__name__}\n\n"
                     f"{joined}"
                 )
-            _write_cache(corpus_cache_path, final_context)
+            if corpus_summary_cacheable:
+                _write_cache(corpus_cache_path, final_context)
 
     return StagedLiteratureResult(
         paper_context=final_context,

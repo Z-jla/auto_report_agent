@@ -22,6 +22,7 @@ output/*.docx
 output/*.md
 output/*.json
 output/literature_cache/
+output/runs/
 !output/.gitkeep
 streamlit.*.log
 *.log

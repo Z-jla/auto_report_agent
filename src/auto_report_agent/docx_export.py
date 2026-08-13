@@ -110,7 +110,14 @@ def markdown_to_docx_bytes(markdown_text: str, title: str = "Auto Report") -> by
 
 def _set_default_font(doc, qn, Pt) -> None:
     styles = doc.styles
-    for style_name in ["Normal", "Heading 1", "Heading 2", "Heading 3", "List Bullet", "List Number"]:
+    for style_name in [
+        "Normal",
+        "Heading 1",
+        "Heading 2",
+        "Heading 3",
+        "List Bullet",
+        "List Number",
+    ]:
         if style_name not in styles:
             continue
         style = styles[style_name]
@@ -144,7 +151,7 @@ def _parse_inline_spans(text: str) -> list[_InlineSpan]:
 
         kind, match = next_match
         if match.start() > cursor:
-            spans.append(_InlineSpan(text=text[cursor:match.start()]))
+            spans.append(_InlineSpan(text=text[cursor : match.start()]))
 
         if kind == "link":
             label, url = match.group(1), match.group(2)
@@ -217,6 +224,7 @@ def _add_table(doc, table_lines: list[str]) -> None:
 def _add_code_block(doc, code_text: str, Pt, RGBColor) -> None:
     p = doc.add_paragraph()
     from docx.shared import Inches
+
     p.paragraph_format.left_indent = Inches(0.2)
     run = p.add_run(code_text)
     run.font.name = "Consolas"

@@ -59,7 +59,7 @@ auto_report_agent/
 
 - Python `>=3.10,<3.14`
 - Any OpenAI-compatible API service: OpenAI, Azure OpenAI, DeepSeek, Qwen, Kimi, Zhipu GLM, Ollama, vLLM, and third-party aggregators.
-- Web search requires a provider that exposes the Responses API `web_search_preview` tool.
+- Web search requires a provider that exposes the Responses API `web_search` tool or the compatible legacy `web_search_preview` tool.
 - Image understanding requires a model with vision input.
 
 ## Install
@@ -109,16 +109,26 @@ LLM_MODEL=your-model-name
 LLM_VISION_MODEL=
 
 # chat: plain Chat Completions
-# responses: Responses API (required for web_search_preview)
+# responses: Responses API (used for web search)
 LLM_API_MODE=chat
 
 # Enable provider web search
 ENABLE_WEB_SEARCH=false
+
+# Safe public mode; use local for Ollama/private endpoints on a trusted machine
+APP_DEPLOYMENT_MODE=public
 ```
 
 > Compatibility: the legacy names `OPENAI_API_KEY`, `OPENAI_API_BASE`, `OPENAI_MODEL_NAME`, `OPENAI_VISION_MODEL_NAME`, and `OPENAI_API_MODE` still work as fallback. If both are set, `LLM_*` wins.
 
 > Note: do not commit `.env` to GitHub. `.env` is already listed in `.gitignore`.
+
+### Deployment mode and upload limits
+
+- `APP_DEPLOYMENT_MODE=public` (the safe default): never pre-fills the browser with a server-side key, accepts only public HTTPS API hosts, and disables global cache cleanup.
+- `APP_DEPLOYMENT_MODE=local`: for a trusted single-user machine; permits `http://localhost`, Ollama, vLLM, and private API hosts.
+- Public mode permits the built-in provider hosts plus custom hosts in `APP_ALLOWED_API_HOSTS` (wildcards such as `*.example.com` are supported). Private endpoints require both an allowlist entry and `APP_ALLOW_PRIVATE_API_HOSTS=true`; enable this only in a trusted environment.
+- Defaults: 10 MB per image, 5 documents, 25 MB per document, 50 MB total, and 200 PDF pages. The `MAX_*` variables in `.env.example` tune these limits; Streamlit also enforces a 50 MB pre-application upload ceiling.
 
 ## Run the frontend
 
@@ -151,10 +161,11 @@ auto-report-agent
 
 ## Output
 
-Default output:
+Each run gets an isolated directory:
 
 ```text
-output/final_report.md
+output/runs/<run_id>/final_report.md
+output/runs/<run_id>/run.json
 ```
 
 The frontend also offers downloads for:
@@ -163,14 +174,15 @@ The frontend also offers downloads for:
 - `final_report.pdf`
 - `final_report.docx`
 
-Generated files are not committed by default.
+Generated files are not committed by default. Streamlit only displays report history from the current browser session and does not load another session's run directory.
 
 ## Development and testing
 
 ```bash
 pip install -e ".[dev]"
 ruff check .
-python -m compileall -q .
+ruff format --check .
+python -m compileall -q app.py src tests
 pytest -q
 ```
 
@@ -178,13 +190,15 @@ pytest -q
 
 - Do not commit `.env`, API keys, logs, caches, or generated reports.
 - If an API key is accidentally pushed, revoke it immediately and rotate.
-- API config entered in the Streamlit page is only applied to the current process. `api_environment()` restores environment variables after each run so keys are not leaked across sessions.
+- Public mode never sends a server key to the browser. Each model run clears managed variables, serializes and applies only the current session config, then restores the process environment.
+- Base URLs are checked for scheme, host, DNS result, and private addresses; shared deployments should also configure a host allowlist.
+- Every report uses an isolated run directory. Literature caches include the browser session, model, base URL, API mode, prompt version, and generation settings.
 
 ## FAQ
 
 ### 1. Why do some compatible providers not support web search?
 
-Plain Chat Completions only generates text; it does not imply web search. Web search in this project relies on the provider exposing the Responses API `web_search_preview` tool.
+Plain Chat Completions only generates text; it does not imply web search. The project prefers the Responses API `web_search` tool and falls back to `web_search_preview` for older compatible providers.
 
 ### 2. Why do the PDF and the web page not look exactly the same?
 
@@ -192,7 +206,7 @@ The web page is rendered by the browser's Markdown renderer; the PDF is rendered
 
 ### 3. Why is literature analysis slow with many papers?
 
-Literature analysis reads, summarizes, and merges in stages; long documents cause multiple model calls. Tune `PAPER_CHUNK_SIZE`, `PAPER_MAX_CHUNKS_PER_DOC`, etc. in `.env` to trade off cost and speed.
+Literature analysis reads, summarizes, and merges in stages. When a document exceeds the chunk cap, chunks are sampled evenly from the beginning, middle, and end, and the coverage ratio is included in the merged material. Tune `PAPER_CHUNK_SIZE`, `PAPER_MAX_CHUNKS_PER_DOC`, etc. in `.env` to trade off cost and speed.
 
 ## License
 
