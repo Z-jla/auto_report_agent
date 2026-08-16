@@ -159,6 +159,21 @@ python -m auto_report_agent.main
 auto-report-agent
 ```
 
+不带参数时会逐项询问。也可以直接用参数调用，便于脚本化：
+
+```bash
+# 主题研究报告
+auto-report-agent --mode topic --topic "AI Agent 最新进展"
+
+# 文献分析（给了 --file 就默认按文献模式）
+auto-report-agent --file a.pdf --file b.pdf --instruction "对比方法与结论"
+
+# 自动化场景：缺参数时直接报错，不阻塞等待输入
+auto-report-agent --mode topic --topic "..." --no-input
+```
+
+传入参数后不会再追问可选项；`--no-input` 时缺少必需参数会以退出码 2 结束。
+
 ## 输出文件
 
 每次运行使用独立目录：

@@ -159,6 +159,21 @@ Or after install:
 auto-report-agent
 ```
 
+With no arguments it prompts for each value. Flags make it scriptable:
+
+```bash
+# Topic research report
+auto-report-agent --mode topic --topic "Recent progress in AI agents"
+
+# Literature analysis (--file implies paper mode)
+auto-report-agent --file a.pdf --file b.pdf --instruction "Compare methods and conclusions"
+
+# Automation: fail instead of blocking on stdin
+auto-report-agent --mode topic --topic "..." --no-input
+```
+
+Passing any flag suppresses the optional prompts; with `--no-input` a missing required value exits with code 2.
+
 ## Output
 
 Each run gets an isolated directory:
