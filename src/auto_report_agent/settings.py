@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -8,6 +9,11 @@ from dotenv import load_dotenv
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 SOURCE_ROOT = PACKAGE_ROOT.parents[1]
+LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+# Loggers this project writes through. app.py runs as "__main__" under
+# `streamlit run`, so it needs naming explicitly.
+_APP_LOGGER_NAMES = ("auto_report_agent", "app", "__main__")
 
 
 def _default_app_home() -> Path:
@@ -110,9 +116,52 @@ def normalize_llm_env() -> None:
             os.environ[friendly] = os.environ[canonical]
 
 
-def initialize_runtime() -> None:
-    """Apply runtime defaults shared by CLI, Streamlit and helper modules."""
+def configure_logging(root: logging.Logger | None = None) -> None:
+    """Give this project's loggers a formatted destination.
+
+    Public deployments log exceptions server-side rather than rendering them, so
+    without a handler those records fall through to ``logging.lastResort``: bare
+    stderr with no timestamp, level or logger name. Streamlit installs its own
+    root handler, so one is only added when nothing else has configured logging
+    (the CLI case); third-party loggers stay at WARNING either way to keep
+    LiteLLM and friends from drowning out our messages.
+
+    ``root`` defaults to the real root logger and exists so tests can inspect the
+    handler without fighting whatever else has configured logging.
+    """
+    level_name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    level = logging.getLevelName(level_name or "INFO")
+    if not isinstance(level, int):
+        level = logging.INFO
+
+    target = root if root is not None else logging.getLogger()
+    if not target.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+        target.addHandler(handler)
+        target.setLevel(logging.WARNING)
+
+    for name in _APP_LOGGER_NAMES:
+        logging.getLogger(name).setLevel(level)
+
+
+_INITIALIZED = False
+
+
+def initialize_runtime(*, force: bool = False) -> None:
+    """Apply runtime defaults shared by CLI, Streamlit and helper modules.
+
+    Idempotent: six modules call this at import time, and re-reading ``.env`` and
+    re-attaching handlers on every one of those imports is wasted work. Pass
+    ``force=True`` to re-run it after deliberately changing the environment.
+    """
+    global _INITIALIZED
+    if _INITIALIZED and not force:
+        return
+
     force_utf8_stdio()
     setup_local_crewai_paths()
     load_environment()
     normalize_llm_env()
+    configure_logging()
+    _INITIALIZED = True
