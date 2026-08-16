@@ -4,6 +4,8 @@ import re
 from html import escape
 from io import BytesIO
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+
 
 def markdown_to_pdf_bytes(markdown_text: str, title: str = "Auto Report") -> bytes:
     """Convert a Markdown report to PDF bytes.
@@ -83,6 +85,16 @@ def markdown_to_pdf_bytes(markdown_text: str, title: str = "Auto Report") -> byt
         spaceBefore=8,
         spaceAfter=6,
     )
+    h4 = ParagraphStyle(
+        "ChineseH4",
+        parent=base,
+        fontSize=11,
+        leading=16,
+        spaceBefore=6,
+        spaceAfter=4,
+    )
+    # Markdown allows six heading levels; anything deeper than h4 reuses the h4 style.
+    heading_styles = (h1, h2, h3, h4)
     quote = ParagraphStyle(
         "ChineseQuote",
         parent=base,
@@ -178,14 +190,12 @@ def markdown_to_pdf_bytes(markdown_text: str, title: str = "Auto Report") -> byt
             story.append(Spacer(1, 8))
             continue
 
-        if stripped.startswith("# "):
-            story.append(Paragraph(_inline(stripped[2:]), h1))
-        elif stripped.startswith("## "):
-            story.append(Paragraph(_inline(stripped[3:]), h2))
-        elif stripped.startswith("### "):
-            story.append(Paragraph(_inline(stripped[4:]), h3))
+        heading = _HEADING_RE.match(stripped)
+        if heading:
+            level = min(len(heading.group(1)), len(heading_styles))
+            story.append(_paragraph(heading.group(2), heading_styles[level - 1], Paragraph))
         elif stripped.startswith("> "):
-            story.append(Paragraph(_inline(stripped[2:]), quote))
+            story.append(_paragraph(stripped[2:], quote, Paragraph))
         elif re.match(r"^[-*]\s+", stripped):
             items, i = _collect_list(
                 lines,
@@ -209,7 +219,7 @@ def markdown_to_pdf_bytes(markdown_text: str, title: str = "Auto Report") -> byt
             story.append(ListFlowable(items, bulletType="1", leftIndent=18))
             continue
         else:
-            story.append(Paragraph(_inline(stripped), base))
+            story.append(_paragraph(stripped, base, Paragraph))
 
         i += 1
 
@@ -230,10 +240,27 @@ def _footer(canvas, doc) -> None:
 
 def _inline(text: str) -> str:
     text = escape(text)
+    # ``***x***`` must be handled before ``**x**`` so the two markers cannot produce
+    # crossed tags like ``<b><i>x</b></i>``, which ReportLab rejects with ValueError.
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", text)
     text = re.sub(r"`([^`]+)`", r"<font backColor='#F0F0F0'>\1</font>", text)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
     return text
+
+
+def _paragraph(text: str, style, Paragraph):
+    """Build a Paragraph, degrading to plain text when inline markup is malformed.
+
+    Reports come from an LLM, so stray or unbalanced Markdown markers are possible.
+    ReportLab raises ``ValueError`` while parsing such markup, which would otherwise
+    fail the whole export instead of just losing the styling on one line.
+    """
+    try:
+        return Paragraph(_inline(text), style)
+    except ValueError:
+        return Paragraph(escape(text), style)
 
 
 def _looks_like_table(lines: list[str], index: int) -> bool:
@@ -261,7 +288,7 @@ def _build_table(
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
         style = table_header if idx == 0 else table_cell
-        rows.append([Paragraph(_inline(c), style) for c in cells])
+        rows.append([_paragraph(c, style, Paragraph) for c in cells])
 
     column_count = max((len(row) for row in rows), default=1)
     table = Table(
@@ -313,6 +340,6 @@ def _collect_list(lines, index, unordered, style, ListItem, Paragraph):
         match = re.match(pattern, stripped)
         if not match:
             break
-        items.append(ListItem(Paragraph(_inline(match.group(1)), style)))
+        items.append(ListItem(_paragraph(match.group(1), style, Paragraph)))
         index += 1
     return items, index

@@ -390,6 +390,21 @@ def build_paper_topic(topic: str, paper_instruction: str) -> str:
     return topic.strip() or paper_instruction.strip() or "上传文献分析与总结"
 
 
+@st.cache_data(show_spinner=False, max_entries=16, ttl=3600)
+def _report_pdf_bytes(report: str) -> bytes:
+    """Render a report to PDF once per distinct text.
+
+    Streamlit re-runs the whole script on every widget interaction, so without a
+    cache each sidebar click would re-render the full PDF and DOCX.
+    """
+    return markdown_to_pdf_bytes(report, title="Auto Report")
+
+
+@st.cache_data(show_spinner=False, max_entries=16, ttl=3600)
+def _report_docx_bytes(report: str) -> bytes:
+    return markdown_to_docx_bytes(report, title="Auto Report")
+
+
 def render_download_buttons(report: str, prefix: str = "") -> None:
     """渲染 Markdown / PDF / Word 下载按钮。"""
     col_md, col_pdf, col_docx = st.columns(3)
@@ -405,7 +420,7 @@ def render_download_buttons(report: str, prefix: str = "") -> None:
 
     with col_pdf:
         try:
-            pdf_bytes = markdown_to_pdf_bytes(report, title="Auto Report")
+            pdf_bytes = _report_pdf_bytes(report)
         except RuntimeError as exc:
             st.error(str(exc))
         else:
@@ -419,7 +434,7 @@ def render_download_buttons(report: str, prefix: str = "") -> None:
 
     with col_docx:
         try:
-            docx_bytes = markdown_to_docx_bytes(report, title="Auto Report")
+            docx_bytes = _report_docx_bytes(report)
         except RuntimeError as exc:
             st.error(str(exc))
         else:
@@ -439,7 +454,7 @@ def render_cache_manager() -> None:
         "缓存额度提醒（MB）",
         min_value=10,
         max_value=102400,
-        value=int(os.getenv("CACHE_QUOTA_MB", "500") or "500"),
+        value=_env_int("CACHE_QUOTA_MB", 500, 10, 102400),
         step=50,
         help="只用于页面进度条提醒，不会自动删除缓存。",
     )

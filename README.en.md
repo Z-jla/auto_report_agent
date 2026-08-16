@@ -202,7 +202,7 @@ Plain Chat Completions only generates text; it does not imply web search. The pr
 
 ### 2. Why do the PDF and the web page not look exactly the same?
 
-The web page is rendered by the browser's Markdown renderer; the PDF is rendered by `reportlab`. Headings, paragraphs, lists, tables, bold text, and CJK line-wrapping are handled, but complex Markdown may need more polish.
+The web page is rendered by the browser's Markdown renderer; the PDF is rendered by `reportlab`. Headings (levels 1-6), paragraphs, lists, tables, bold, italic, and CJK line-wrapping are handled, and unbalanced inline markers degrade to plain text instead of failing the whole export. Complex Markdown may still need more polish.
 
 ### 3. Why is literature analysis slow with many papers?
 

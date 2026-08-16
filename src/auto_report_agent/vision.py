@@ -176,5 +176,3 @@ def analyze_image_content(
         if getattr(response, "output_text", None):
             return response.output_text.strip()
         raise RuntimeError("图片识别失败：模型在 Responses 接口返回空内容。") from chat_error
-
-    raise RuntimeError("图片识别失败：模型没有返回可用文本。")

@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from io import BytesIO
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+
 
 @dataclass
 class _InlineSpan:
@@ -76,12 +78,9 @@ def markdown_to_docx_bytes(markdown_text: str, title: str = "Auto Report") -> by
             _add_table(doc, table_lines)
             continue
 
-        if stripped.startswith("# "):
-            _add_heading_with_inline(doc, stripped[2:], level=1)
-        elif stripped.startswith("## "):
-            _add_heading_with_inline(doc, stripped[3:], level=2)
-        elif stripped.startswith("### "):
-            _add_heading_with_inline(doc, stripped[4:], level=3)
+        heading = _HEADING_RE.match(stripped)
+        if heading:
+            _add_heading_with_inline(doc, heading.group(2), level=len(heading.group(1)))
         elif stripped.startswith("> "):
             p = doc.add_paragraph()
             _write_inline_runs(p, stripped[2:], italic_default=True)
@@ -115,6 +114,9 @@ def _set_default_font(doc, qn, Pt) -> None:
         "Heading 1",
         "Heading 2",
         "Heading 3",
+        "Heading 4",
+        "Heading 5",
+        "Heading 6",
         "List Bullet",
         "List Number",
     ]:
