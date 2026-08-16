@@ -49,7 +49,12 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B"]
+# UP keeps typing imports current. SIM and RET are deliberately off: SIM105
+# would put a contextlib.suppress inside per-file stat loops, which is slower
+# than a try/except that costs nothing when it does not fire, and SIM108/RET504
+# would replace clearer blocks with a dense ternary and break the re.sub chain
+# in pdf_export._inline.
+select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501", "E402", "B008"]
 
 [tool.pytest.ini_options]

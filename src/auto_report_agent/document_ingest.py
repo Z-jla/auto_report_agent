@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import re
 import zipfile
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from docx import Document
 
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 DEFAULT_MAX_DOCS = 5
-DEFAULT_MAX_CHARS_PER_DOC = 18000
+# Matches the PAPER_MAX_CHARS_PER_DOC default both entrypoints pass. Text beyond
+# this is sampled from the head, middle and tail rather than cut off.
+DEFAULT_MAX_CHARS_PER_DOC = 120000
 DEFAULT_PREVIEW_CHARS = 1200
 DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
 DEFAULT_MAX_TOTAL_BYTES = 50 * 1024 * 1024
@@ -312,23 +314,6 @@ def parse_document_paths(
         max_docx_uncompressed_bytes=max_docx_uncompressed_bytes,
         max_docx_compression_ratio=max_docx_compression_ratio,
     )
-
-
-def build_paper_context(documents: Sequence[ParsedDocument]) -> str:
-    sections: list[str] = []
-    for index, document in enumerate(documents, start=1):
-        truncated_note = "，已截断" if document.truncated else ""
-        sections.append(
-            f"""## 文献 {index}
-- 文件名：{document.name}
-- 文件类型：{document.extension}
-- 提取文本长度：{document.original_chars} 字符（提供给模型 {document.extracted_chars} 字符{truncated_note}）
-
-### 文献正文
-{document.content}
-"""
-        )
-    return "\n\n".join(sections).strip()
 
 
 def build_paper_preview(

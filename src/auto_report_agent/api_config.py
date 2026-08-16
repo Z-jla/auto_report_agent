@@ -4,10 +4,12 @@ import ipaddress
 import os
 import socket
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
 from urllib.parse import urlsplit
+
+from auto_report_agent.settings import env_bool
 
 
 @dataclass(frozen=True)
@@ -92,13 +94,6 @@ API_ENV_KEYS = {
 _API_ENV_LOCK = threading.RLock()
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on"}
-
-
 def is_public_deployment() -> bool:
     """Return whether the app should apply public/multi-user safety defaults."""
     return os.getenv("APP_DEPLOYMENT_MODE", "public").strip().lower() != "local"
@@ -162,7 +157,7 @@ def validate_base_url(
     private_allowed = (
         allow_private
         if allow_private is not None
-        else (not is_public_deployment() or _env_bool("APP_ALLOW_PRIVATE_API_HOSTS"))
+        else (not is_public_deployment() or env_bool("APP_ALLOW_PRIVATE_API_HOSTS", False))
     )
     if not private_allowed and parsed.scheme != "https":
         raise ValueError("公共部署只允许 HTTPS API 地址。")

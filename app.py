@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
-import os
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import streamlit as st
 
-from auto_report_agent.settings import initialize_runtime
+from auto_report_agent.settings import env_bool, env_int, initialize_runtime
 
 initialize_runtime()
 
@@ -288,22 +287,6 @@ class EventTimeline:
         return f"{ev.icon} {ts}{agent_part}{ev.title}"
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw not in {"0", "false", "no", "off", "禁用", "关闭"}
-
-
-def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
-    raw = os.getenv(name, "").strip()
-    try:
-        value = int(raw) if raw else default
-    except ValueError:
-        value = default
-    return max(minimum, min(maximum, value))
-
-
 def _render_exception(exc: Exception) -> None:
     if is_public_deployment():
         LOGGER.exception("Public request failed", exc_info=exc)
@@ -355,7 +338,7 @@ def generate_report(
             }
         )
     except Exception:
-        keep_paper_draft = mode == "paper" and _env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True)
+        keep_paper_draft = mode == "paper" and env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True)
         if keep_paper_draft and paths.report_file.exists():
             if timeline:
                 timeline.log("生成过程失败，但已保留当前文献草稿用于下载/手动检查。", icon="📝")
@@ -483,7 +466,7 @@ def render_cache_manager() -> None:
         "缓存额度提醒（MB）",
         min_value=10,
         max_value=102400,
-        value=_env_int("CACHE_QUOTA_MB", 500, 10, 102400),
+        value=env_int("CACHE_QUOTA_MB", 500, 10, 102400),
         step=50,
         help="只用于页面进度条提醒，不会自动删除缓存。",
     )
@@ -731,7 +714,7 @@ def main() -> None:
                 validate_image_bytes(
                     uploaded_image_bytes,
                     mime_type=uploaded_image_mime,
-                    max_bytes=_env_int("MAX_IMAGE_MB", 10, 1, 50) * 1024 * 1024,
+                    max_bytes=env_int("MAX_IMAGE_MB", 10, 1, 50) * 1024 * 1024,
                 )
             except (RuntimeError, ValueError) as exc:
                 image_upload_error = str(exc)
@@ -760,9 +743,9 @@ def main() -> None:
             help="支持上传 PDF / DOCX / TXT / MD，可一次上传多篇。",
         )
         st.caption(
-            f"最多 {_env_int('MAX_DOCUMENTS', 5, 1, 20)} 篇；"
-            f"单文件上限 {_env_int('MAX_DOCUMENT_FILE_MB', 25, 1, 50)} MB；"
-            f"总上限 {_env_int('MAX_DOCUMENT_TOTAL_MB', 50, 1, 50)} MB。"
+            f"最多 {env_int('MAX_DOCUMENTS', 5, 1, 20)} 篇；"
+            f"单文件上限 {env_int('MAX_DOCUMENT_FILE_MB', 25, 1, 50)} MB；"
+            f"总上限 {env_int('MAX_DOCUMENT_TOTAL_MB', 50, 1, 50)} MB。"
             "超长文献会均匀覆盖开头、中部和结尾。"
         )
 
@@ -832,19 +815,19 @@ def main() -> None:
             timeline.log("检测到文献输入，开始解析上传文件。", icon="📄")
             with st.spinner("正在解析文献内容..."):
                 try:
-                    max_documents = _env_int("MAX_DOCUMENTS", 5, 1, 20)
-                    max_file_bytes = _env_int("MAX_DOCUMENT_FILE_MB", 25, 1, 50) * 1024 * 1024
-                    max_total_bytes = _env_int("MAX_DOCUMENT_TOTAL_MB", 50, 1, 50) * 1024 * 1024
-                    max_chars_per_doc = _env_int("PAPER_MAX_CHARS_PER_DOC", 120000, 20000, 200000)
+                    max_documents = env_int("MAX_DOCUMENTS", 5, 1, 20)
+                    max_file_bytes = env_int("MAX_DOCUMENT_FILE_MB", 25, 1, 50) * 1024 * 1024
+                    max_total_bytes = env_int("MAX_DOCUMENT_TOTAL_MB", 50, 1, 50) * 1024 * 1024
+                    max_chars_per_doc = env_int("PAPER_MAX_CHARS_PER_DOC", 120000, 20000, 200000)
                     documents = parse_uploaded_documents(
                         uploaded_papers,
                         max_docs=max_documents,
                         max_chars_per_doc=max_chars_per_doc,
                         max_file_bytes=max_file_bytes,
                         max_total_bytes=max_total_bytes,
-                        max_pdf_pages=_env_int("MAX_PDF_PAGES", 200, 1, 1000),
+                        max_pdf_pages=env_int("MAX_PDF_PAGES", 200, 1, 1000),
                         max_docx_uncompressed_bytes=(
-                            _env_int("MAX_DOCX_UNCOMPRESSED_MB", 100, 1, 500) * 1024 * 1024
+                            env_int("MAX_DOCX_UNCOMPRESSED_MB", 100, 1, 500) * 1024 * 1024
                         ),
                     )
                     timeline.log(

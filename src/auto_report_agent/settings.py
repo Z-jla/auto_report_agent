@@ -64,6 +64,30 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
+# The Chinese negatives have always been accepted for opt-out flags. There is
+# deliberately no Chinese positive: adding one would turn security gates such as
+# APP_ALLOW_PRIVATE_API_HOSTS on for values that keep them off today.
+_FALSY_VALUES = frozenset({"0", "false", "no", "off", "禁用", "关闭"})
+
+
+def env_bool(name: str, default: bool) -> bool:
+    """Read a boolean environment variable, falling back to ``default``.
+
+    Only a recognised value decides; anything else keeps ``default``. This suits
+    both directions the project needs: an opt-out flag defaulting to ``True``
+    stays on unless explicitly disabled, and an opt-in security flag defaulting
+    to ``False`` is not enabled by a typo the way "anything that is not 'false'"
+    would.
+    """
+    raw = os.getenv(name, "").strip().lower()
+    if raw in _TRUTHY_VALUES:
+        return True
+    if raw in _FALSY_VALUES:
+        return False
+    return default
+
+
 def force_utf8_stdio() -> None:
     """Force UTF-8 stdio on Windows to avoid GBK console errors from CrewAI logs."""
     os.environ.setdefault("PYTHONUTF8", "1")

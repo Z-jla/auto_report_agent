@@ -67,7 +67,7 @@ jobs:
       - name: Verify wheel contents
         run: |
           python -m pip install --no-deps dist/*.whl
-          python -c "from importlib.resources import files; assert files('auto_report_agent').joinpath('config/agents.yaml').is_file()"
+          python -c "from importlib.resources import files; root = files('auto_report_agent'); assert root.joinpath('config/agents.yaml').is_file(); assert root.joinpath('config/tasks.yaml').is_file(); assert root.joinpath('py.typed').is_file()"
 
   security:
     runs-on: ubuntu-latest

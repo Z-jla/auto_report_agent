@@ -1,7 +1,6 @@
-import os
 from datetime import datetime
 
-from auto_report_agent.settings import initialize_runtime
+from auto_report_agent.settings import env_int, initialize_runtime
 
 initialize_runtime()
 
@@ -14,14 +13,6 @@ from auto_report_agent.run_manager import (  # noqa: E402
     write_text_atomic,
 )
 from auto_report_agent.staged_literature import summarize_documents_staged  # noqa: E402
-
-
-def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError:
-        value = default
-    return max(minimum, min(maximum, value))
 
 
 def run() -> None:
@@ -44,7 +35,7 @@ def run() -> None:
         file_paths = [part.strip() for part in raw_paths.split(";") if part.strip()]
         documents = parse_document_paths(
             file_paths,
-            max_chars_per_doc=_env_int("PAPER_MAX_CHARS_PER_DOC", 120000, 20000, 200000),
+            max_chars_per_doc=env_int("PAPER_MAX_CHARS_PER_DOC", 120000, 20000, 200000),
         )
         staged_result = summarize_documents_staged(
             documents,

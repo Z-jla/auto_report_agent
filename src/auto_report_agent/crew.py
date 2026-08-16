@@ -1,5 +1,4 @@
 import os
-from typing import List
 
 from auto_report_agent.settings import initialize_runtime
 
@@ -16,8 +15,8 @@ from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool  # noqa
 class AutoReportCrew:
     """主题研究 / 文献分析 的自动报告生成 Crew。"""
 
-    agents: List[BaseAgent]
-    tasks: List[Task]
+    agents: list[BaseAgent]
+    tasks: list[Task]
 
     agents_config = "config/agents.yaml"
     tasks_config = "config/tasks.yaml"

@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 
 from auto_report_agent.api_config import resolve_llm_env, validate_base_url
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
-from auto_report_agent.settings import LITERATURE_CACHE_DIR, initialize_runtime
+from auto_report_agent.settings import (
+    LITERATURE_CACHE_DIR,
+    env_bool,
+    env_int,
+    initialize_runtime,
+)
 
 ProgressCallback = Callable[[str], None]
 CACHE_VERSION = "staged-literature-v4"
@@ -30,24 +34,6 @@ class StagedLiteratureResult:
     paper_context: str
     chunk_count: int
     doc_count: int
-
-
-def _get_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(minimum, min(maximum, value))
-
-
-def _get_bool_env(name: str, default: bool = True) -> bool:
-    raw = os.getenv(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw not in {"0", "false", "no", "off", "禁用", "关闭"}
 
 
 def _hash_text(text: str, length: int = 16) -> str:
@@ -71,7 +57,7 @@ def _cache_root_for_document(document: ParsedDocument, *, cache_namespace: str) 
 
 
 def _read_cache(path: Path) -> str | None:
-    if not _get_bool_env("PAPER_CACHE_ENABLED", True):
+    if not env_bool("PAPER_CACHE_ENABLED", True):
         return None
     try:
         if path.exists():
@@ -83,7 +69,7 @@ def _read_cache(path: Path) -> str | None:
 
 
 def _write_cache(path: Path, content: str) -> None:
-    if not _get_bool_env("PAPER_CACHE_ENABLED", True):
+    if not env_bool("PAPER_CACHE_ENABLED", True):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
@@ -620,13 +606,13 @@ def summarize_documents_staged(
     cache_namespace: str = "shared",
 ) -> StagedLiteratureResult:
     """分块阅读文献，生成压缩后的综合文献上下文。"""
-    chunk_size = _get_int_env("PAPER_CHUNK_SIZE", 6000, 2000, 12000)
-    max_chunks_per_doc = _get_int_env("PAPER_MAX_CHUNKS_PER_DOC", 10, 3, 30)
-    max_output_tokens = _get_int_env("PAPER_STAGE_MAX_OUTPUT_TOKENS", 900, 300, 2000)
-    merge_output_tokens = _get_int_env("PAPER_STAGE_MERGE_TOKENS", 1400, 500, 3000)
-    timeout = _get_int_env("PAPER_STAGE_TIMEOUT", 90, 20, 180)
-    retries = _get_int_env("PAPER_STAGE_RETRIES", 1, 0, 3)
-    workers = _get_int_env("PAPER_STAGE_CONCURRENCY", 4, 1, 16)
+    chunk_size = env_int("PAPER_CHUNK_SIZE", 6000, 2000, 12000)
+    max_chunks_per_doc = env_int("PAPER_MAX_CHUNKS_PER_DOC", 10, 3, 30)
+    max_output_tokens = env_int("PAPER_STAGE_MAX_OUTPUT_TOKENS", 900, 300, 2000)
+    merge_output_tokens = env_int("PAPER_STAGE_MERGE_TOKENS", 1400, 500, 3000)
+    timeout = env_int("PAPER_STAGE_TIMEOUT", 90, 20, 180)
+    retries = env_int("PAPER_STAGE_RETRIES", 1, 0, 3)
+    workers = env_int("PAPER_STAGE_CONCURRENCY", 4, 1, 16)
     cache_identity = _runtime_cache_identity(
         chunk_size=chunk_size,
         max_chunks_per_doc=max_chunks_per_doc,
@@ -727,7 +713,7 @@ def summarize_documents_staged(
                 )
             except Exception as exc:
                 doc_summary_cacheable = False
-                fallback_enabled = _get_bool_env("PAPER_FALLBACK_ON_MERGE_TIMEOUT", True)
+                fallback_enabled = env_bool("PAPER_FALLBACK_ON_MERGE_TIMEOUT", True)
                 if not fallback_enabled:
                     raise
                 if progress:
@@ -783,7 +769,7 @@ def summarize_documents_staged(
                 )
             except Exception as exc:
                 corpus_summary_cacheable = False
-                fallback_enabled = _get_bool_env("PAPER_FALLBACK_ON_MERGE_TIMEOUT", True)
+                fallback_enabled = env_bool("PAPER_FALLBACK_ON_MERGE_TIMEOUT", True)
                 if not fallback_enabled:
                     raise
                 if progress:

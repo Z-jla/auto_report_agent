@@ -6,7 +6,6 @@ import pytest
 
 from auto_report_agent.document_ingest import (
     DEFAULT_MAX_DOCS,
-    build_paper_context,
     build_paper_preview,
     extract_text_from_bytes,
     parse_document_paths,
@@ -15,7 +14,7 @@ from auto_report_agent.document_ingest import (
 
 
 def test_extract_text_from_utf8_txt():
-    text = extract_text_from_bytes("note.txt", "你好\n世界".encode("utf-8"))
+    text = extract_text_from_bytes("note.txt", "你好\n世界".encode())
     assert "你好" in text
     assert "世界" in text
 
@@ -113,22 +112,18 @@ def test_parse_document_paths_missing_file(tmp_path: Path):
         parse_document_paths([str(missing)])
 
 
-def test_build_paper_context_and_preview(tmp_path: Path):
+def test_build_paper_preview(tmp_path: Path):
     p1 = tmp_path / "one.txt"
     p1.write_text("alpha", encoding="utf-8")
     p2 = tmp_path / "two.md"
     p2.write_text("beta", encoding="utf-8")
     documents = parse_document_paths([str(p1), str(p2)])
 
-    context = build_paper_context(documents)
-    assert "文献 1" in context
-    assert "文献 2" in context
-    assert "one.txt" in context
-    assert "two.md" in context
-
     preview = build_paper_preview(documents, preview_chars=3)
     assert "one.txt" in preview
     assert "two.md" in preview
+    assert "文献 1" in preview
+    assert "文献 2" in preview
 
 
 def test_parse_document_paths_empty_list():

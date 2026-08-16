@@ -3,7 +3,7 @@ import logging
 import pytest
 
 from auto_report_agent import settings
-from auto_report_agent.settings import configure_logging, env_int, initialize_runtime
+from auto_report_agent.settings import configure_logging, env_bool, env_int, initialize_runtime
 
 
 @pytest.fixture
@@ -38,6 +38,44 @@ def test_env_int_falls_back_and_clamps(monkeypatch, raw, expected):
         monkeypatch.setenv("SOME_SETTING", raw)
 
     assert env_int("SOME_SETTING", 500, 10, 1000) == expected
+
+
+# --- env_bool ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", " True ", "yes", "on", "ON"])
+def test_env_bool_recognises_truthy_values(monkeypatch, raw):
+    monkeypatch.setenv("SOME_FLAG", raw)
+    assert env_bool("SOME_FLAG", False) is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "no", "off", "禁用", "关闭"])
+def test_env_bool_recognises_falsy_values(monkeypatch, raw):
+    monkeypatch.setenv("SOME_FLAG", raw)
+    assert env_bool("SOME_FLAG", True) is False
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "maybe", "启用", "2", "null"])
+def test_unrecognised_values_keep_the_default(monkeypatch, raw):
+    """Both directions matter: opt-out flags stay on, opt-in gates stay off."""
+    monkeypatch.setenv("SOME_FLAG", raw)
+
+    assert env_bool("SOME_FLAG", True) is True
+    assert env_bool("SOME_FLAG", False) is False
+
+
+def test_env_bool_unset_uses_default(monkeypatch):
+    monkeypatch.delenv("SOME_FLAG", raising=False)
+
+    assert env_bool("SOME_FLAG", True) is True
+    assert env_bool("SOME_FLAG", False) is False
+
+
+def test_security_gate_is_not_opened_by_a_typo(monkeypatch):
+    """A private-host override must need an explicit yes, not merely 'not false'."""
+    monkeypatch.setenv("APP_ALLOW_PRIVATE_API_HOSTS", "ture")
+
+    assert env_bool("APP_ALLOW_PRIVATE_API_HOSTS", False) is False
 
 
 # --- initialize_runtime ------------------------------------------------------
