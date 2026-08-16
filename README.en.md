@@ -208,6 +208,8 @@ The web page is rendered by the browser's Markdown renderer; the PDF is rendered
 
 Literature analysis reads, summarizes, and merges in stages. When a document exceeds the chunk cap, chunks are sampled evenly from the beginning, middle, and end, and the coverage ratio is included in the merged material. Tune `PAPER_CHUNK_SIZE`, `PAPER_MAX_CHUNKS_PER_DOC`, etc. in `.env` to trade off cost and speed.
 
+Chunk summaries within one document are independent, so four of them run concurrently by default (`PAPER_STAGE_CONCURRENCY`, 1-16), measured at roughly 3x faster on a ten-chunk document. Set it to `1` for the previous serial behaviour if your provider quota is low and returns 429s. Cached chunks do not consume a concurrency slot.
+
 ## License
 
 MIT License

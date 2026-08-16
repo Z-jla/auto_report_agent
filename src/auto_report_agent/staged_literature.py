@@ -8,6 +8,7 @@ import secrets
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -457,6 +458,159 @@ def _corpus_merge_prompt(
 """.strip()
 
 
+@dataclass(frozen=True)
+class _ChunkStageOptions:
+    """Settings shared by every chunk-summarization call in one run."""
+
+    topic: str
+    instruction: str
+    cache_namespace: str
+    cache_identity: dict[str, object]
+    max_output_tokens: int
+    timeout: int
+    retries: int
+    workers: int
+
+
+def _chunk_coverage_note(
+    chunk_index: int, total_chunks: int, char_start: int, char_end: int
+) -> str:
+    return (
+        f"> 覆盖片段：原始分块 {chunk_index}/{total_chunks}，提供文本字符 {char_start}-{char_end}"
+    )
+
+
+def _summarize_chunk_uncached(
+    *,
+    document: ParsedDocument,
+    options: _ChunkStageOptions,
+    cache_path: Path,
+    chunk_index: int,
+    total_chunks: int,
+    char_start: int,
+    char_end: int,
+    chunk_text: str,
+) -> str:
+    """Call the model for a single chunk and cache the result.
+
+    This runs on a worker thread, so it must not touch the progress callback:
+    the Streamlit timeline may only be updated from the thread running the script.
+    """
+    summary = _call_model(
+        _chunk_prompt(
+            topic=options.topic,
+            instruction=options.instruction,
+            document_name=document.name,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            char_start=char_start,
+            char_end=char_end,
+            chunk_text=chunk_text,
+        ),
+        max_output_tokens=options.max_output_tokens,
+        timeout=options.timeout,
+        retries=options.retries,
+    )
+    _write_cache(cache_path, summary)
+    return summary
+
+
+def _summarize_document_chunks(
+    document: ParsedDocument,
+    *,
+    options: _ChunkStageOptions,
+    all_chunks: Sequence[str],
+    all_ranges: Sequence[tuple[int, int]],
+    selected_chunks: Sequence[tuple[int, str]],
+    progress: ProgressCallback | None = None,
+) -> list[str]:
+    """Summarize one document's selected chunks, running uncached ones in parallel.
+
+    Chunk summaries only depend on their own text, so the ones that need a model
+    call are dispatched to a small thread pool instead of being issued one at a
+    time. Results are reassembled in document order regardless of completion
+    order, and every progress message is emitted from the calling thread.
+    """
+    total_chunks = len(all_chunks)
+    summaries: list[str] = [""] * len(selected_chunks)
+    pending: list[tuple[int, int, str, Path]] = []
+
+    # Resolve cache hits up front: they need no network, and settling them here
+    # sizes the pool to the work that actually costs a model call.
+    for position, (chunk_index, chunk) in enumerate(selected_chunks):
+        char_start, char_end = all_ranges[chunk_index - 1]
+        cache_path = _chunk_cache_path(
+            document=document,
+            topic=options.topic,
+            instruction=options.instruction,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            chunk_text=chunk,
+            cache_namespace=options.cache_namespace,
+            cache_identity=options.cache_identity,
+        )
+        cached_summary = _read_cache(cache_path)
+        if cached_summary:
+            if progress:
+                progress(
+                    f"命中缓存：《{document.name}》原始片段 {chunk_index}/{total_chunks} "
+                    "已完成，跳过模型调用。"
+                )
+            note = _chunk_coverage_note(chunk_index, total_chunks, char_start, char_end)
+            summaries[position] = f"{note}\n\n{cached_summary}"
+        else:
+            pending.append((position, chunk_index, chunk, cache_path))
+
+    if not pending:
+        return summaries
+
+    workers = max(1, min(options.workers, len(pending)))
+    if progress:
+        progress(
+            f"《{document.name}》需要调用模型的片段共 {len(pending)} 个，"
+            f"并发 {workers} 个同时分析。"
+        )
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chunk-summary") as pool:
+        futures = {}
+        for position, chunk_index, chunk, cache_path in pending:
+            char_start, char_end = all_ranges[chunk_index - 1]
+            future = pool.submit(
+                _summarize_chunk_uncached,
+                document=document,
+                options=options,
+                cache_path=cache_path,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                char_start=char_start,
+                char_end=char_end,
+                chunk_text=chunk,
+            )
+            futures[future] = (position, chunk_index, char_start, char_end)
+
+        completed = 0
+        try:
+            for future in as_completed(futures):
+                position, chunk_index, char_start, char_end = futures[future]
+                summary = future.result()
+                completed += 1
+                if progress:
+                    progress(
+                        f"已完成《{document.name}》原始片段 {chunk_index}/{total_chunks}"
+                        f"（{completed}/{len(pending)}）。"
+                    )
+                note = _chunk_coverage_note(chunk_index, total_chunks, char_start, char_end)
+                summaries[position] = f"{note}\n\n{summary}"
+        except Exception:
+            # Drop chunks that have not started yet, so one failure does not make
+            # the user wait for every remaining chunk to run or time out.
+            for future in futures:
+                future.cancel()
+            raise
+
+    return summaries
+
+
 def summarize_documents_staged(
     documents: Sequence[ParsedDocument],
     *,
@@ -472,11 +626,23 @@ def summarize_documents_staged(
     merge_output_tokens = _get_int_env("PAPER_STAGE_MERGE_TOKENS", 1400, 500, 3000)
     timeout = _get_int_env("PAPER_STAGE_TIMEOUT", 90, 20, 180)
     retries = _get_int_env("PAPER_STAGE_RETRIES", 1, 0, 3)
+    workers = _get_int_env("PAPER_STAGE_CONCURRENCY", 4, 1, 16)
     cache_identity = _runtime_cache_identity(
         chunk_size=chunk_size,
         max_chunks_per_doc=max_chunks_per_doc,
         max_output_tokens=max_output_tokens,
         merge_output_tokens=merge_output_tokens,
+    )
+    # Concurrency does not change model output, so it stays out of cache_identity.
+    chunk_options = _ChunkStageOptions(
+        topic=topic,
+        instruction=instruction,
+        cache_namespace=cache_namespace,
+        cache_identity=cache_identity,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
+        retries=retries,
+        workers=workers,
     )
 
     doc_summaries: list[tuple[str, str]] = []
@@ -520,59 +686,15 @@ def summarize_documents_staged(
                 f"{selection_note}。"
             )
 
-        chunk_summaries: list[str] = []
-        for selected_position, (chunk_index, chunk) in enumerate(selected_chunks, start=1):
-            char_start, char_end = all_ranges[chunk_index - 1]
-            chunk_cache_path = _chunk_cache_path(
-                document=document,
-                topic=topic,
-                instruction=instruction,
-                chunk_index=chunk_index,
-                total_chunks=len(all_chunks),
-                chunk_text=chunk,
-                cache_namespace=cache_namespace,
-                cache_identity=cache_identity,
-            )
-            cached_summary = _read_cache(chunk_cache_path)
-            if cached_summary:
-                if progress:
-                    progress(
-                        f"命中缓存：《{document.name}》原始片段 {chunk_index}/{len(all_chunks)} "
-                        "已完成，跳过模型调用。"
-                    )
-                chunk_summaries.append(
-                    f"> 覆盖片段：原始分块 {chunk_index}/{len(all_chunks)}，"
-                    f"提供文本字符 {char_start}-{char_end}\n\n{cached_summary}"
-                )
-                total_chunk_count += 1
-                continue
-
-            if progress:
-                progress(
-                    f"正在分析《{document.name}》选中片段 {selected_position}/{len(selected_chunks)}"
-                    f"（原始分块 {chunk_index}/{len(all_chunks)}）。"
-                )
-            summary = _call_model(
-                _chunk_prompt(
-                    topic=topic,
-                    instruction=instruction,
-                    document_name=document.name,
-                    chunk_index=chunk_index,
-                    total_chunks=len(all_chunks),
-                    char_start=char_start,
-                    char_end=char_end,
-                    chunk_text=chunk,
-                ),
-                max_output_tokens=max_output_tokens,
-                timeout=timeout,
-                retries=retries,
-            )
-            _write_cache(chunk_cache_path, summary)
-            chunk_summaries.append(
-                f"> 覆盖片段：原始分块 {chunk_index}/{len(all_chunks)}，"
-                f"提供文本字符 {char_start}-{char_end}\n\n{summary}"
-            )
-            total_chunk_count += 1
+        chunk_summaries = _summarize_document_chunks(
+            document,
+            options=chunk_options,
+            all_chunks=all_chunks,
+            all_ranges=all_ranges,
+            selected_chunks=selected_chunks,
+            progress=progress,
+        )
+        total_chunk_count += len(selected_chunks)
 
         doc_cache_path = _doc_summary_cache_path(
             document=document,
