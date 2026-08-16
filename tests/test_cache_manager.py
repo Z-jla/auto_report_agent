@@ -1,4 +1,5 @@
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -6,9 +7,11 @@ import pytest
 
 from auto_report_agent import cache_manager
 from auto_report_agent.cache_manager import (
+    CacheTarget,
     _ensure_inside_project,
     _last_touched,
     _pycache_dirs,
+    clean_cache,
     enforce_retention,
     format_bytes,
     scan_cache,
@@ -184,3 +187,95 @@ def test_retention_tolerates_a_missing_root(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cache_manager, "retention_roots", lambda: [tmp_path / "nope"])
 
     assert enforce_retention(retention_days=1).removed_dirs == 0
+
+
+# --- clean_cache -------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_targets(monkeypatch, tmp_path: Path):
+    """Point every cache target at tmp_path so cleanup cannot touch real data."""
+    monkeypatch.setattr(cache_manager, "PROJECT_ROOT", tmp_path)
+    literature = tmp_path / "output" / "literature_cache"
+    tmp_dir = tmp_path / ".tmp"
+    for directory in (literature, tmp_dir):
+        directory.mkdir(parents=True)
+    (literature / "chunk.md").write_text("x" * 50, encoding="utf-8")
+    (tmp_dir / "scratch").write_text("y" * 10, encoding="utf-8")
+
+    targets = [
+        CacheTarget("literature_cache", "文献缓存", literature, "desc", True),
+        CacheTarget("tmp", "临时目录", tmp_dir, "desc", True),
+    ]
+    monkeypatch.setattr(cache_manager, "cache_targets", lambda: targets)
+    return literature, tmp_dir
+
+
+def test_clean_removes_only_the_selected_target(fake_targets):
+    literature, tmp_dir = fake_targets
+
+    [result] = clean_cache({"literature_cache"})
+
+    assert not literature.exists()
+    assert tmp_dir.exists(), "unselected targets must be left alone"
+    assert result.deleted_bytes == 50
+    assert result.deleted_files == 1
+    assert result.error == ""
+
+
+def test_clean_reports_each_selected_target(fake_targets):
+    results = clean_cache({"literature_cache", "tmp"})
+
+    assert {r.key for r in results} == {"literature_cache", "tmp"}
+    assert all(r.error == "" for r in results)
+    assert sum(r.deleted_bytes for r in results) == 60
+
+
+def test_unknown_key_is_reported_without_touching_anything(fake_targets):
+    literature, _ = fake_targets
+
+    [result] = clean_cache({"nonsense"})
+
+    assert result.error == "未知缓存类别"
+    assert literature.exists()
+
+
+def test_cleaning_a_missing_directory_is_not_an_error(fake_targets):
+    literature, _ = fake_targets
+    shutil.rmtree(literature)
+
+    [result] = clean_cache({"literature_cache"})
+
+    assert result.error == ""
+    assert result.deleted_bytes == 0
+
+
+def test_a_failure_is_reported_per_target(monkeypatch, fake_targets):
+    def boom(paths):
+        raise PermissionError("file in use")
+
+    monkeypatch.setattr(cache_manager, "_delete_paths", boom)
+
+    results = clean_cache({"literature_cache", "tmp"})
+
+    assert all("PermissionError" in r.error for r in results)
+    assert all(r.deleted_bytes == 0 for r in results)
+
+
+def test_clean_refuses_a_target_outside_the_project(monkeypatch, tmp_path: Path):
+    """The guard matters because targets come from configuration."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("important", encoding="utf-8")
+    monkeypatch.setattr(cache_manager, "PROJECT_ROOT", tmp_path / "project")
+    (tmp_path / "project").mkdir()
+    monkeypatch.setattr(
+        cache_manager,
+        "cache_targets",
+        lambda: [CacheTarget("escape", "越界", outside, "desc")],
+    )
+
+    [result] = clean_cache({"escape"})
+
+    assert "拒绝清理" in result.error
+    assert (outside / "keep.txt").exists()

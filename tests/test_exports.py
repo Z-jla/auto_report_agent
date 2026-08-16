@@ -3,7 +3,7 @@ from io import BytesIO
 import pytest
 from docx import Document
 
-from auto_report_agent.docx_export import markdown_to_docx_bytes
+from auto_report_agent.docx_export import _parse_inline_spans, markdown_to_docx_bytes
 from auto_report_agent.pdf_export import _inline, markdown_to_pdf_bytes
 
 SAMPLE_MARKDOWN = """# 测试报告
@@ -90,3 +90,73 @@ def test_pdf_export_survives_crossed_inline_markup() -> None:
 def test_pdf_export_survives_odd_markers(text: str) -> None:
     data = markdown_to_pdf_bytes(f"# 标题\n\n{text}\n")
     assert data.startswith(b"%PDF")
+
+
+# --- DOCX inline parsing -----------------------------------------------------
+
+
+def _spans(text: str) -> list[tuple[str, bool, bool, bool]]:
+    return [(s.text, s.bold, s.italic, s.code) for s in _parse_inline_spans(text)]
+
+
+def test_plain_text_is_a_single_span():
+    assert _spans("just words") == [("just words", False, False, False)]
+
+
+def test_bold_italic_and_code_are_marked():
+    assert _spans("**b**") == [("b", True, False, False)]
+    assert _spans("*i*") == [("i", False, True, False)]
+    assert _spans("`c`") == [("c", False, False, True)]
+
+
+def test_links_become_label_plus_url():
+    assert _spans("[label](https://example.com)") == [
+        ("label (https://example.com)", False, False, False)
+    ]
+
+
+def test_surrounding_text_is_preserved_around_markup():
+    assert _spans("before **mid** after") == [
+        ("before ", False, False, False),
+        ("mid", True, False, False),
+        (" after", False, False, False),
+    ]
+
+
+def test_the_earliest_marker_wins():
+    """Scanning must not reorder spans by pattern priority."""
+    assert _spans("`code` then **bold**") == [
+        ("code", False, False, True),
+        (" then ", False, False, False),
+        ("bold", True, False, False),
+    ]
+
+
+def test_bold_is_not_mistaken_for_italic():
+    assert _spans("**bold**") == [("bold", True, False, False)]
+
+
+def test_unbalanced_markers_stay_literal():
+    assert _spans("**unclosed") == [("**unclosed", False, False, False)]
+    assert _spans("a * b") == [("a * b", False, False, False)]
+
+
+def test_empty_input_yields_no_spans():
+    assert _parse_inline_spans("") == []
+
+
+def test_multiple_markers_of_each_kind():
+    assert _spans("**a** and **b**") == [
+        ("a", True, False, False),
+        (" and ", False, False, False),
+        ("b", True, False, False),
+    ]
+
+
+def test_docx_renders_inline_styles_into_runs():
+    document = Document(BytesIO(markdown_to_docx_bytes("普通 **加粗** 与 `代码`")))
+    runs = [r for p in document.paragraphs for r in p.runs if r.text.strip()]
+
+    styled = {r.text: (r.bold, r.font.name) for r in runs}
+    assert styled["加粗"][0] is True
+    assert styled["代码"][1] == "Consolas"
