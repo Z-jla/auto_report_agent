@@ -24,7 +24,9 @@ from auto_report_agent.api_config import (  # noqa: E402
     validate_base_url,
 )
 from auto_report_agent.cache_manager import (  # noqa: E402
+    CacheStats,
     clean_cache,
+    enforce_retention,
     format_bytes,
     scan_cache,
     total_cache_bytes,
@@ -463,6 +465,17 @@ def render_download_buttons(report: str, prefix: str = "") -> None:
             )
 
 
+@st.cache_data(show_spinner=False, ttl=30)
+def _cached_cache_scan() -> list[CacheStats]:
+    """Scan cache sizes at most twice a minute.
+
+    The scan walks the project tree, and Streamlit re-runs the whole script on
+    every widget interaction, so an uncached call would repeat the walk on each
+    sidebar click. Callers that change what is on disk must clear it.
+    """
+    return scan_cache()
+
+
 def render_cache_manager() -> None:
     """Render cache quota monitor and manual cleanup controls in the sidebar."""
     st.subheader("缓存管理")
@@ -475,7 +488,7 @@ def render_cache_manager() -> None:
         help="只用于页面进度条提醒，不会自动删除缓存。",
     )
 
-    stats = scan_cache()
+    stats = _cached_cache_scan()
     total_bytes = total_cache_bytes(stats)
     quota_bytes = quota_mb * 1024 * 1024
     usage_ratio = min(1.0, total_bytes / quota_bytes) if quota_bytes else 0.0
@@ -513,10 +526,12 @@ def render_cache_manager() -> None:
                 for result in errors:
                     st.error(f"{result.label} 清理失败：{result.error}")
             st.success(f"已清理 {format_bytes(deleted)}。")
+            _cached_cache_scan.clear()
             st.rerun()
 
     with col_refresh:
         if st.button("刷新", use_container_width=True):
+            _cached_cache_scan.clear()
             st.rerun()
 
 
@@ -666,6 +681,20 @@ def main() -> None:
 
     if "session_id" not in st.session_state:
         st.session_state.session_id = secrets.token_hex(16)
+
+    if "retention_swept" not in st.session_state:
+        # Runs and per-session literature caches are never reclaimed otherwise,
+        # and public deployments hide the manual cleanup UI entirely.
+        st.session_state.retention_swept = True
+        sweep = enforce_retention()
+        if sweep.removed_dirs:
+            LOGGER.info(
+                "Retention sweep removed %d directories (%d bytes)",
+                sweep.removed_dirs,
+                sweep.removed_bytes,
+            )
+        for message in sweep.errors:
+            LOGGER.warning("Retention sweep could not remove an entry: %s", message)
 
     mode_label = st.radio(
         "选择任务模式",

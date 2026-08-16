@@ -36,8 +36,26 @@ ROOT_DIR = PROJECT_ROOT
 ENV_FILE = PROJECT_ROOT / ".env"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 RUNS_DIR = OUTPUT_DIR / "runs"
+LITERATURE_CACHE_DIR = OUTPUT_DIR / "literature_cache"
 CREWAI_STORAGE_DIR = PROJECT_ROOT / ".crewai_storage"
 LOCALAPPDATA_DIR = PROJECT_ROOT / ".localappdata"
+
+
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Read an integer environment variable, falling back and clamping to range.
+
+    Unset, blank and unparseable values all yield ``default``; anything outside
+    ``[minimum, maximum]`` is clamped rather than rejected, so a bad value in
+    ``.env`` degrades to a usable setting instead of failing the request.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
 
 
 def force_utf8_stdio() -> None:

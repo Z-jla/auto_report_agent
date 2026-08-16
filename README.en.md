@@ -176,6 +176,10 @@ The frontend also offers downloads for:
 
 Generated files are not committed by default. Streamlit only displays report history from the current browser session and does not load another session's run directory.
 
+### Automatic cleanup
+
+Run directories and per-session literature caches accumulate indefinitely, and public mode disables the manual cleanup sidebar, so on startup the app deletes `output/runs/<run_id>/` entries and literature-cache namespaces older than `OUTPUT_RETENTION_DAYS` (default 7). Set it to `0` to disable. This is a disk-usage backstop rather than a precise cache policy: an evicted entry is simply recomputed on the next request.
+
 ## Development and testing
 
 ```bash

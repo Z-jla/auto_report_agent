@@ -5,6 +5,7 @@ from auto_report_agent.settings import initialize_runtime
 
 initialize_runtime()
 
+from auto_report_agent.cache_manager import enforce_retention  # noqa: E402
 from auto_report_agent.crew import AutoReportCrew  # noqa: E402
 from auto_report_agent.document_ingest import parse_document_paths  # noqa: E402
 from auto_report_agent.run_manager import (  # noqa: E402
@@ -25,6 +26,10 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 
 def run() -> None:
     """运行自动报告生成流程。"""
+    sweep = enforce_retention()
+    if sweep.removed_dirs:
+        print(f"[清理] 已删除 {sweep.removed_dirs} 个过期运行/缓存目录。")
+
     mode_input = input("请选择模式（1=主题研究报告，2=文献分析总结）：").strip()
     mode = "paper" if mode_input == "2" else "topic"
 

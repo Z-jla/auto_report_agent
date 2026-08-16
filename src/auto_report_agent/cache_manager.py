@@ -1,15 +1,39 @@
 from __future__ import annotations
 
+import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from auto_report_agent.settings import (
     CREWAI_STORAGE_DIR,
+    LITERATURE_CACHE_DIR,
     LOCALAPPDATA_DIR,
     OUTPUT_DIR,
     PROJECT_ROOT,
     RUNS_DIR,
+    env_int,
+)
+
+DEFAULT_RETENTION_DAYS = 7
+
+# Directories that are large and never worth walking from the app. The README
+# tells users to create .venv inside the repository and .git grows without
+# bound; any __pycache__ inside them belongs to dependencies, not this project.
+_UNWALKED_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        ".pip-cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".tox",
+        "site-packages",
+    }
 )
 
 
@@ -51,7 +75,7 @@ def cache_targets() -> list[CacheTarget]:
         CacheTarget(
             key="literature_cache",
             label="文献分阶段缓存",
-            path=OUTPUT_DIR / "literature_cache",
+            path=LITERATURE_CACHE_DIR,
             description="保存文献分块摘要、单篇合并摘要和多篇综合摘要。可安全清理，之后同一文献会重新调用模型分析。",
             default_selected=True,
         ),
@@ -276,6 +300,102 @@ def total_cache_bytes(stats: list[CacheStats] | None = None) -> int:
     return sum(item.bytes for item in stats)
 
 
+@dataclass(frozen=True)
+class RetentionResult:
+    removed_dirs: int
+    removed_bytes: int
+    errors: list[str]
+
+
+def _directory_bytes(path: Path) -> int:
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _last_touched(path: Path) -> float:
+    """Best-effort "recently used" time for a directory.
+
+    Writing a nested file only bumps the mtime of its immediate parent, so the
+    top directory alone can look stale while the tree is in active use. Looking
+    one level down is cheap and matches how runs and cache namespaces are laid
+    out.
+    """
+    try:
+        newest = path.stat().st_mtime
+    except OSError:
+        return 0.0
+    try:
+        for child in path.iterdir():
+            try:
+                newest = max(newest, child.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return newest
+
+
+def retention_roots() -> list[Path]:
+    """Directories holding one expirable child per run or per browser session."""
+    return [RUNS_DIR, LITERATURE_CACHE_DIR / "namespaces"]
+
+
+def enforce_retention(
+    *, retention_days: int | None = None, now: float | None = None
+) -> RetentionResult:
+    """Delete run and literature-cache directories older than the retention window.
+
+    Generated runs and per-session literature caches otherwise grow without
+    bound, and public deployments hide the manual cleanup UI entirely, so this is
+    their only reclaim path. Evicting an entry that is still referenced is safe:
+    the next request recomputes it.
+
+    Set ``OUTPUT_RETENTION_DAYS=0`` to disable the sweep.
+    """
+    days = (
+        retention_days
+        if retention_days is not None
+        else env_int("OUTPUT_RETENTION_DAYS", DEFAULT_RETENTION_DAYS, 0, 365)
+    )
+    if days <= 0:
+        return RetentionResult(0, 0, [])
+
+    cutoff = (now if now is not None else time.time()) - days * 86400
+    removed_dirs = 0
+    removed_bytes = 0
+    errors: list[str] = []
+
+    for root in retention_roots():
+        if not root.is_dir():
+            continue
+        try:
+            children = sorted(root.iterdir())
+        except OSError as exc:
+            errors.append(f"{root}: {type(exc).__name__}: {exc}")
+            continue
+
+        for child in children:
+            if not child.is_dir() or _last_touched(child) >= cutoff:
+                continue
+            try:
+                _ensure_inside_project(child)
+                size = _directory_bytes(child)
+                shutil.rmtree(child)
+            except Exception as exc:  # noqa: BLE001 - one stuck entry must not break startup
+                errors.append(f"{child.name}: {type(exc).__name__}: {exc}")
+                continue
+            removed_dirs += 1
+            removed_bytes += size
+
+    return RetentionResult(removed_dirs, removed_bytes, errors)
+
+
 def _generated_output_files() -> list[Path]:
     if not OUTPUT_DIR.exists():
         return []
@@ -288,7 +408,20 @@ def _generated_output_files() -> list[Path]:
 
 
 def _pycache_dirs() -> list[Path]:
-    return [path for path in PROJECT_ROOT.rglob("__pycache__") if path.is_dir()]
+    """Locate this project's __pycache__ directories without walking dependencies.
+
+    ``rglob`` would descend into .git and a repository-local .venv, which is tens
+    of thousands of entries; this runs on every Streamlit rerun, so the walk is
+    pruned to the project's own tree.
+    """
+    found: list[Path] = []
+    for root, dirnames, _filenames in os.walk(PROJECT_ROOT):
+        found.extend(Path(root) / name for name in dirnames if name == "__pycache__")
+        # os.walk honours in-place edits to dirnames, so this prunes the descent.
+        dirnames[:] = [
+            name for name in dirnames if name != "__pycache__" and name not in _UNWALKED_DIR_NAMES
+        ]
+    return found
 
 
 def _delete_files(paths: list[Path]) -> None:

@@ -16,13 +16,13 @@ from typing import Callable, Sequence
 from auto_report_agent.api_config import resolve_llm_env, validate_base_url
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
-from auto_report_agent.settings import OUTPUT_DIR, initialize_runtime
+from auto_report_agent.settings import LITERATURE_CACHE_DIR, initialize_runtime
 
 ProgressCallback = Callable[[str], None]
 CACHE_VERSION = "staged-literature-v4"
 PROMPT_VERSION = "literature-prompts-2026-08-13-v2"
 initialize_runtime()
-CACHE_DIR = OUTPUT_DIR / "literature_cache"
+CACHE_DIR = LITERATURE_CACHE_DIR
 
 
 @dataclass
