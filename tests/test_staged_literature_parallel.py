@@ -4,6 +4,7 @@ import time
 import pytest
 
 from auto_report_agent import staged_literature
+from auto_report_agent.api_config import ResolvedLLMConfig
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.staged_literature import (
     _ChunkStageOptions,
@@ -14,6 +15,14 @@ from auto_report_agent.staged_literature import (
 CHUNKS = ["chunk-alpha", "chunk-beta", "chunk-gamma", "chunk-delta"]
 RANGES = [(1, 11), (12, 22), (23, 33), (34, 44)]
 SELECTED = list(enumerate(CHUNKS, start=1))
+TEST_CONFIG = ResolvedLLMConfig(
+    api_key="test-key",
+    base_url="https://test.example/v1",
+    model="test-model",
+    vision_model="",
+    api_mode="chat",
+    enable_web_search=False,
+)
 
 
 @pytest.fixture
@@ -41,6 +50,7 @@ def _options(**overrides) -> _ChunkStageOptions:
         "instruction": "instruction",
         "cache_namespace": "session",
         "cache_identity": {"version": "test"},
+        "config": TEST_CONFIG,
         "max_output_tokens": 900,
         "timeout": 90,
         "retries": 0,

@@ -20,9 +20,10 @@ from auto_report_agent.agent_events import (  # noqa: E402
 )
 from auto_report_agent.api_config import (  # noqa: E402
     PROVIDER_PRESETS,
-    api_environment,
+    ResolvedLLMConfig,
     default_api_config,
     is_public_deployment,
+    llm_config_from_mapping,
     redacted_api_summary,
     validate_base_url,
 )
@@ -144,6 +145,7 @@ def generate_report(
     *,
     mode: str,
     topic: str,
+    llm_config: ResolvedLLMConfig,
     timeline: EventTimeline | None = None,
     paper_context: str = "",
     paper_instruction: str = "",
@@ -157,7 +159,11 @@ def generate_report(
             timeline.log("启动 CrewAI：按 研究 → 写作 → 审核 顺序执行。", icon="🚀")
 
     paths = run_paths or create_run_paths()
-    crew = AutoReportCrew().build_crew(mode=mode)
+    # Held for the whole run: CrewAI memoizes its agents on the builder's
+    # id, so letting it be collected mid-run would let another session's
+    # builder reuse that address and reconfigure these agents.
+    crew_builder = AutoReportCrew()
+    crew = crew_builder.build_crew(mode=mode, llm_config=llm_config)
 
     if timeline is not None:
 
@@ -615,7 +621,7 @@ def main() -> None:
             st.error("请先在左侧「API 配置」里填写 API Key、Base URL 和文本模型名。")
             return
         try:
-            validate_base_url(str(api_config["base_url"]))
+            llm_config = llm_config_from_mapping(api_config)
         except ValueError as exc:
             st.error(f"API Base URL 不安全或不可用：{exc}")
             return
@@ -641,12 +647,12 @@ def main() -> None:
                 timeline.log("检测到图片输入，开始进行视觉识别。", icon="🖼️")
                 with st.spinner("正在识别图片内容..."):
                     try:
-                        with api_environment(api_config):
-                            image_analysis = analyze_image_content(
-                                uploaded_image_bytes or b"",
-                                mime_type=uploaded_image_mime,
-                                instruction=image_instruction,
-                            )
+                        image_analysis = analyze_image_content(
+                            uploaded_image_bytes or b"",
+                            mime_type=uploaded_image_mime,
+                            instruction=image_instruction,
+                            config=llm_config,
+                        )
                         timeline.log("图片识别完成，准备把识别结果交给报告 Agent。", icon="✅")
                     except Exception as exc:
                         timeline.log("图片识别失败。", icon="❌")
@@ -697,14 +703,14 @@ def main() -> None:
 
             with st.spinner("正在分阶段阅读文献并生成阶段性摘要，请稍等..."):
                 try:
-                    with api_environment(api_config):
-                        staged_result = summarize_documents_staged(
-                            documents,
-                            topic=final_topic,
-                            instruction=paper_instruction,
-                            progress=timeline.log,
-                            cache_namespace=str(st.session_state.session_id),
-                        )
+                    staged_result = summarize_documents_staged(
+                        documents,
+                        topic=final_topic,
+                        instruction=paper_instruction,
+                        progress=timeline.log,
+                        cache_namespace=str(st.session_state.session_id),
+                        config=llm_config,
+                    )
                     paper_context = staged_result.paper_context
                     timeline.log(
                         f"分阶段阅读完成：共处理 {staged_result.doc_count} 篇文献、"
@@ -729,15 +735,15 @@ def main() -> None:
         run_paths = create_run_paths()
         with st.spinner(spinner_text):
             try:
-                with api_environment(api_config):
-                    report = generate_report(
-                        mode=mode,
-                        topic=final_topic,
-                        timeline=timeline,
-                        paper_context=paper_context,
-                        paper_instruction=paper_instruction,
-                        run_paths=run_paths,
-                    )
+                report = generate_report(
+                    mode=mode,
+                    topic=final_topic,
+                    llm_config=llm_config,
+                    timeline=timeline,
+                    paper_context=paper_context,
+                    paper_instruction=paper_instruction,
+                    run_paths=run_paths,
+                )
             except Exception as exc:
                 timeline.log("报告生成失败。", icon="❌")
                 timeline.finalize(success=False)

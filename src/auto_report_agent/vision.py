@@ -15,7 +15,11 @@ from openai import (
     RateLimitError,
 )
 
-from auto_report_agent.api_config import resolve_llm_env, validate_base_url
+from auto_report_agent.api_config import (
+    ResolvedLLMConfig,
+    resolve_llm_env,
+    validate_base_url,
+)
 from auto_report_agent.settings import initialize_runtime
 
 initialize_runtime()
@@ -65,19 +69,25 @@ def analyze_image_content(
     image_bytes: bytes,
     mime_type: str = "image/png",
     instruction: str = "",
+    *,
+    config: ResolvedLLMConfig | None = None,
 ) -> str:
     """Use the configured OpenAI-compatible model to analyze an uploaded image.
 
     Returns a Markdown text containing OCR result, visual description, key facts,
     and suggested next-step task interpretation.
+
+    ``config`` carries one caller's settings; it defaults to the process
+    environment, which is what the CLI uses.
     """
-    env = resolve_llm_env(prefer_vision_model=True)
+    env = config or resolve_llm_env(prefer_vision_model=True)
+    model = env.image_model
 
     if not env.api_key:
         raise RuntimeError("缺少 LLM_API_KEY（或 OPENAI_API_KEY），无法进行图片识别。")
     if not env.base_url:
         raise RuntimeError("缺少 LLM_BASE_URL（或 OPENAI_API_BASE），无法进行图片识别。")
-    if not env.model:
+    if not model:
         raise RuntimeError(
             "缺少视觉模型：请设置 LLM_VISION_MODEL 或 LLM_MODEL（或其 OPENAI_* 对应名）。"
         )
@@ -116,7 +126,7 @@ def analyze_image_content(
 
     try:
         response = client.chat.completions.create(
-            model=env.model,
+            model=model,
             messages=[
                 {
                     "role": "user",
@@ -147,7 +157,7 @@ def analyze_image_content(
         # Chat Completions 拒绝请求或路径不存在，多半是兼容商把视觉接口放在 Responses API 上。
         try:
             response = client.responses.create(
-                model=env.model,
+                model=model,
                 input=[
                     {
                         "role": "user",

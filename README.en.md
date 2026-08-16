@@ -209,7 +209,7 @@ pytest -q
 
 - Do not commit `.env`, API keys, logs, caches, or generated reports.
 - If an API key is accidentally pushed, revoke it immediately and rotate.
-- Public mode never sends a server key to the browser. Each model run clears managed variables, serializes and applies only the current session config, then restores the process environment.
+- Public mode never sends a server key to the browser. Session settings are passed into each model call as an argument rather than written to process environment variables, so concurrent browser sessions neither share credentials nor wait on each other.
 - Base URLs are checked for scheme, host, DNS result, and private addresses; shared deployments should also configure a host allowlist.
 - Every report uses an isolated run directory. Literature caches include the browser session, model, base URL, API mode, prompt version, and generation settings.
 

@@ -12,7 +12,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
-from auto_report_agent.api_config import resolve_llm_env, validate_base_url
+from auto_report_agent.api_config import (
+    ResolvedLLMConfig,
+    resolve_llm_env,
+    validate_base_url,
+)
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
 from auto_report_agent.settings import (
@@ -237,12 +241,13 @@ def chunk_character_ranges(text: str, chunks: Sequence[str]) -> list[tuple[int, 
 
 def _runtime_cache_identity(
     *,
+    config: ResolvedLLMConfig,
     chunk_size: int,
     max_chunks_per_doc: int,
     max_output_tokens: int,
     merge_output_tokens: int,
 ) -> dict[str, object]:
-    env = resolve_llm_env()
+    env = config
     return {
         "cache_version": CACHE_VERSION,
         "prompt_version": PROMPT_VERSION,
@@ -275,8 +280,15 @@ def _extract_response_text(data: dict) -> str:
     return ""
 
 
-def _call_model(prompt: str, *, max_output_tokens: int, timeout: int, retries: int = 1) -> str:
-    env = resolve_llm_env()
+def _call_model(
+    prompt: str,
+    *,
+    config: ResolvedLLMConfig,
+    max_output_tokens: int,
+    timeout: int,
+    retries: int = 1,
+) -> str:
+    env = config
 
     if not env.api_key:
         raise RuntimeError("缺少 LLM_API_KEY（或 OPENAI_API_KEY），无法进行分阶段文献分析。")
@@ -452,6 +464,7 @@ class _ChunkStageOptions:
     instruction: str
     cache_namespace: str
     cache_identity: dict[str, object]
+    config: ResolvedLLMConfig
     max_output_tokens: int
     timeout: int
     retries: int
@@ -493,6 +506,7 @@ def _summarize_chunk_uncached(
             char_end=char_end,
             chunk_text=chunk_text,
         ),
+        config=options.config,
         max_output_tokens=options.max_output_tokens,
         timeout=options.timeout,
         retries=options.retries,
@@ -604,8 +618,15 @@ def summarize_documents_staged(
     instruction: str,
     progress: ProgressCallback | None = None,
     cache_namespace: str = "shared",
+    config: ResolvedLLMConfig | None = None,
 ) -> StagedLiteratureResult:
-    """分块阅读文献，生成压缩后的综合文献上下文。"""
+    """分块阅读文献，生成压缩后的综合文献上下文。
+
+    ``config`` carries one caller's LLM settings; it defaults to the process
+    environment, which is what the CLI uses. It also feeds the cache identity, so
+    switching model or endpoint does not reuse another configuration's summaries.
+    """
+    config = config or resolve_llm_env()
     chunk_size = env_int("PAPER_CHUNK_SIZE", 6000, 2000, 12000)
     max_chunks_per_doc = env_int("PAPER_MAX_CHUNKS_PER_DOC", 10, 3, 30)
     max_output_tokens = env_int("PAPER_STAGE_MAX_OUTPUT_TOKENS", 900, 300, 2000)
@@ -614,6 +635,7 @@ def summarize_documents_staged(
     retries = env_int("PAPER_STAGE_RETRIES", 1, 0, 3)
     workers = env_int("PAPER_STAGE_CONCURRENCY", 4, 1, 16)
     cache_identity = _runtime_cache_identity(
+        config=config,
         chunk_size=chunk_size,
         max_chunks_per_doc=max_chunks_per_doc,
         max_output_tokens=max_output_tokens,
@@ -625,6 +647,7 @@ def summarize_documents_staged(
         instruction=instruction,
         cache_namespace=cache_namespace,
         cache_identity=cache_identity,
+        config=config,
         max_output_tokens=max_output_tokens,
         timeout=timeout,
         retries=retries,
@@ -707,6 +730,7 @@ def summarize_documents_staged(
                         document_name=document.name,
                         chunk_summaries=chunk_summaries,
                     ),
+                    config=config,
                     max_output_tokens=merge_output_tokens,
                     timeout=timeout,
                     retries=retries,
@@ -763,6 +787,7 @@ def summarize_documents_staged(
                         instruction=instruction,
                         doc_summaries=doc_summaries,
                     ),
+                    config=config,
                     max_output_tokens=merge_output_tokens,
                     timeout=timeout,
                     retries=retries,

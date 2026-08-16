@@ -5,7 +5,11 @@ from typing import Any
 
 from crewai.tools import BaseTool
 
-from auto_report_agent.api_config import resolve_llm_env, validate_base_url
+from auto_report_agent.api_config import (
+    ResolvedLLMConfig,
+    resolve_llm_env,
+    validate_base_url,
+)
 from auto_report_agent.settings import initialize_runtime
 
 initialize_runtime()
@@ -17,9 +21,12 @@ class OpenAIWebSearchTool(BaseTool):
         "使用 OpenAI 兼容商的 Responses API web_search 工具联网搜索最新资料。"
         "输入 query，返回搜索后的摘要、关键发现和可能的引用信息。"
     )
+    # Carried on the tool so a search uses the caller's settings rather than
+    # whatever the process environment happens to hold.
+    llm_config: ResolvedLLMConfig | None = None
 
     def _run(self, query: str) -> str:
-        env = resolve_llm_env()
+        env = self.llm_config or resolve_llm_env()
 
         if not env.api_key:
             return "搜索失败：缺少 LLM_API_KEY（或 OPENAI_API_KEY）。"

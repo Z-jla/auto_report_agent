@@ -3,9 +3,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -72,26 +70,6 @@ DEFAULT_PUBLIC_API_HOSTS = frozenset(
     for preset in PROVIDER_PRESETS.values()
     if preset.base_url and (host := urlsplit(preset.base_url).hostname)
 )
-
-
-API_ENV_KEYS = {
-    "LLM_API_KEY",
-    "LLM_BASE_URL",
-    "LLM_MODEL",
-    "LLM_VISION_MODEL",
-    "LLM_API_MODE",
-    "OPENAI_API_KEY",
-    "OPENAI_API_BASE",
-    "OPENAI_BASE_URL",
-    "OPENAI_MODEL_NAME",
-    "MODEL",
-    "OPENAI_VISION_MODEL_NAME",
-    "OPENAI_API_MODE",
-    "ENABLE_WEB_SEARCH",
-}
-
-
-_API_ENV_LOCK = threading.RLock()
 
 
 def is_public_deployment() -> bool:
@@ -215,7 +193,7 @@ def _first_env(*names: str) -> str:
 
 @dataclass(frozen=True)
 class ResolvedLLMConfig:
-    """Runtime view of the active LLM environment, with LLM_* taking priority over OPENAI_*."""
+    """One request's LLM settings, passed explicitly instead of via os.environ."""
 
     api_key: str
     base_url: str
@@ -223,6 +201,11 @@ class ResolvedLLMConfig:
     vision_model: str
     api_mode: str
     enable_web_search: bool
+
+    @property
+    def image_model(self) -> str:
+        """Model to use for vision calls, falling back to the text model."""
+        return self.vision_model or self.model
 
     def require(self, *fields: str) -> None:
         """Raise ``RuntimeError`` when any requested field is empty."""
@@ -293,72 +276,24 @@ def default_api_config(*, include_server_values: bool = True) -> dict[str, str |
     }
 
 
-def apply_api_config(config: dict[str, str | bool]) -> None:
-    """Apply the current UI API config to environment variables used by CrewAI/helpers.
+def llm_config_from_mapping(config: Mapping[str, object]) -> ResolvedLLMConfig:
+    """Build a validated config object from the sidebar's session dictionary.
 
-    Streamlit deployments should prefer session-only config. This function updates
-    process env just-in-time because CrewAI and openai SDK helper calls read the
-    canonical OPENAI_* variables. We also mirror to friendly LLM_* aliases so
-    users scripting against either name see consistent values.
+    Each browser session holds its own settings, so they are carried into the
+    model calls as an argument. Writing them to ``os.environ`` instead would make
+    one user's credentials process-global, which previously forced every run to
+    serialize behind a single lock.
     """
-    api_key = str(config.get("api_key") or "").strip()
-    raw_base_url = str(config.get("base_url") or "").strip()
-    base_url = validate_base_url(raw_base_url) if raw_base_url else ""
-    model = str(config.get("model") or "").strip()
-    vision_model = str(config.get("vision_model") or "").strip()
+    base_url = str(config.get("base_url") or "").strip()
     api_mode = str(config.get("api_mode") or "chat").strip().lower()
-    enable_web_search = bool(config.get("enable_web_search"))
-
-    # Prevent an empty per-session value from inheriting another session's or
-    # the server process's credential/configuration.
-    for key in API_ENV_KEYS:
-        os.environ.pop(key, None)
-
-    if api_key:
-        os.environ["LLM_API_KEY"] = api_key
-        os.environ["OPENAI_API_KEY"] = api_key
-    if base_url:
-        os.environ["LLM_BASE_URL"] = base_url
-        os.environ["OPENAI_API_BASE"] = base_url
-        os.environ["OPENAI_BASE_URL"] = base_url
-    if model:
-        os.environ["LLM_MODEL"] = model
-        os.environ["OPENAI_MODEL_NAME"] = model
-        # Some CrewAI/LiteLLM paths read MODEL when no explicit llm is provided.
-        os.environ["MODEL"] = model
-    if vision_model:
-        os.environ["LLM_VISION_MODEL"] = vision_model
-        os.environ["OPENAI_VISION_MODEL_NAME"] = vision_model
-    else:
-        os.environ.pop("LLM_VISION_MODEL", None)
-        os.environ.pop("OPENAI_VISION_MODEL_NAME", None)
-
-    normalized_mode = "responses" if api_mode == "responses" else "chat"
-    os.environ["LLM_API_MODE"] = normalized_mode
-    os.environ["OPENAI_API_MODE"] = normalized_mode
-    os.environ["ENABLE_WEB_SEARCH"] = "true" if enable_web_search else "false"
-
-
-@contextmanager
-def api_environment(config: dict[str, str | bool]) -> Iterator[None]:
-    """Temporarily apply one user's API config for a model run.
-
-    Streamlit sessions are per user, but ``os.environ`` is process-global.
-    CrewAI and the openai SDK read the canonical OPENAI_* env vars, so this
-    context serializes model runs, applies the current session config, and
-    restores the previous env afterwards to avoid cross-user API key leakage.
-    """
-    with _API_ENV_LOCK:
-        previous = {key: os.environ.get(key) for key in API_ENV_KEYS}
-        try:
-            apply_api_config(config)
-            yield
-        finally:
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+    return ResolvedLLMConfig(
+        api_key=str(config.get("api_key") or "").strip(),
+        base_url=validate_base_url(base_url) if base_url else "",
+        model=str(config.get("model") or "").strip(),
+        vision_model=str(config.get("vision_model") or "").strip(),
+        api_mode="responses" if api_mode == "responses" else "chat",
+        enable_web_search=bool(config.get("enable_web_search")) and api_mode == "responses",
+    )
 
 
 def redacted_api_summary(config: dict[str, str | bool]) -> str:

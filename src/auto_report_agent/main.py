@@ -147,18 +147,16 @@ def generate_report(options: CliOptions) -> tuple[str, object]:
         paper_context = staged_result.paper_context
 
     run_paths = create_run_paths()
-    result = (
-        AutoReportCrew()
-        .build_crew(mode=options.mode)
-        .kickoff(
-            inputs={
-                "topic": options.topic,
-                "paper_instruction": options.instruction,
-                "paper_context": paper_context,
-                "mode": options.mode,
-                "output_file": run_paths.report_file.as_posix(),
-            }
-        )
+    # Held for the whole run; see AutoReportCrew.build_crew.
+    crew_builder = AutoReportCrew()
+    result = crew_builder.build_crew(mode=options.mode).kickoff(
+        inputs={
+            "topic": options.topic,
+            "paper_instruction": options.instruction,
+            "paper_context": paper_context,
+            "mode": options.mode,
+            "output_file": run_paths.report_file.as_posix(),
+        }
     )
 
     if run_paths.report_file.exists():

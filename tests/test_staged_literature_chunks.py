@@ -1,3 +1,4 @@
+from auto_report_agent.api_config import ResolvedLLMConfig
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.staged_literature import (
     _chunk_cache_path,
@@ -66,7 +67,7 @@ def test_chunk_character_ranges_track_sequential_chunks():
     assert chunk_character_ranges(text, chunks) == [(1, 5), (8, 11), (14, 18)]
 
 
-def test_cache_path_changes_with_namespace_model_and_base_url(monkeypatch):
+def test_cache_path_changes_with_namespace_model_and_base_url():
     document = ParsedDocument(
         name="paper.txt",
         extension=".txt",
@@ -77,9 +78,16 @@ def test_cache_path_changes_with_namespace_model_and_base_url(monkeypatch):
     )
 
     def cache_path(namespace: str, *, model: str, base_url: str):
-        monkeypatch.setenv("LLM_MODEL", model)
-        monkeypatch.setenv("LLM_BASE_URL", base_url)
+        # The identity now comes from the explicit config rather than ambient env.
         identity = _runtime_cache_identity(
+            config=ResolvedLLMConfig(
+                api_key="k",
+                base_url=base_url,
+                model=model,
+                vision_model="",
+                api_mode="chat",
+                enable_web_search=False,
+            ),
             chunk_size=6000,
             max_chunks_per_doc=10,
             max_output_tokens=900,

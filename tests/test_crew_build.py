@@ -1,5 +1,6 @@
 import pytest
 
+from auto_report_agent.api_config import ResolvedLLMConfig
 from auto_report_agent.crew import AutoReportCrew
 
 
@@ -62,3 +63,119 @@ def test_final_task_interpolates_isolated_output_path(llm_env, monkeypatch, mode
     )
 
     assert crew.tasks[-1].output_file == output_file
+
+
+# --- explicit LLM config -----------------------------------------------------
+
+
+EXPLICIT = ResolvedLLMConfig(
+    api_key="explicit-key",
+    base_url="https://explicit.example/v1",
+    model="explicit-model",
+    vision_model="",
+    api_mode="chat",
+    enable_web_search=False,
+)
+
+
+@pytest.fixture
+def no_llm_env(monkeypatch):
+    """Strip every variable CrewAI would otherwise fall back to."""
+    for key in (
+        "LLM_API_KEY",
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+        "LLM_VISION_MODEL",
+        "LLM_API_MODE",
+        "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL_NAME",
+        "OPENAI_VISION_MODEL_NAME",
+        "MODEL",
+        "MODEL_NAME",
+        "BASE_URL",
+        "API_BASE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    return monkeypatch
+
+
+def test_crew_runs_without_any_llm_environment(no_llm_env):
+    """The point of passing config explicitly: no process-global state needed."""
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    for agent in crew.agents:
+        assert agent.llm.model == "explicit-model"
+        assert agent.llm.api_key == "explicit-key"
+        assert agent.llm.base_url == "https://explicit.example/v1"
+
+
+def test_every_agent_shares_one_llm(no_llm_env):
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    assert len({id(agent.llm) for agent in crew.agents}) == 1
+
+
+def test_search_tool_receives_the_same_config(no_llm_env):
+    """Otherwise the tool would fall back to reading the environment itself."""
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+    researcher = next(a for a in crew.agents if "研究员" in a.role)
+
+    tool = researcher.tools[0]
+    assert tool.llm_config is not None
+    assert tool.llm_config.api_key == "explicit-key"
+
+
+def test_two_crews_do_not_share_configuration(no_llm_env):
+    """Concurrent sessions must not see each other's credentials."""
+    other = ResolvedLLMConfig(
+        api_key="other-key",
+        base_url="https://other.example/v1",
+        model="other-model",
+        vision_model="",
+        api_mode="chat",
+        enable_web_search=False,
+    )
+
+    first = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+    second = AutoReportCrew().build_crew(mode="topic", llm_config=other)
+
+    assert first.agents[0].llm.model == "explicit-model"
+    assert second.agents[0].llm.model == "other-model"
+    assert first.agents[0].llm.api_key == "explicit-key"
+
+
+def test_missing_model_is_reported_clearly(no_llm_env):
+    blank = ResolvedLLMConfig("k", "https://x.example/v1", "", "", "chat", False)
+
+    with pytest.raises(RuntimeError, match="LLM_MODEL"):
+        AutoReportCrew().build_crew(mode="topic", llm_config=blank)
+
+
+def test_without_explicit_config_it_still_reads_the_environment(llm_env):
+    """The CLI has no session config and relies on .env."""
+    crew = AutoReportCrew().build_crew(mode="topic")
+
+    assert crew.agents[0].llm.model == "demo-model"
+
+
+def test_concurrent_builders_get_distinct_agents(no_llm_env):
+    """Two sessions building at once must not be handed the same agent objects."""
+    other = ResolvedLLMConfig(
+        api_key="other-key",
+        base_url="https://other.example/v1",
+        model="other-model",
+        vision_model="",
+        api_mode="chat",
+        enable_web_search=False,
+    )
+
+    first_builder = AutoReportCrew()
+    second_builder = AutoReportCrew()
+    first = first_builder.build_crew(mode="topic", llm_config=EXPLICIT)
+    second = second_builder.build_crew(mode="topic", llm_config=other)
+
+    assert {id(a) for a in first.agents}.isdisjoint({id(a) for a in second.agents})
+    assert first.agents[0].llm.model == "explicit-model"
+    assert second.agents[0].llm.model == "other-model"
