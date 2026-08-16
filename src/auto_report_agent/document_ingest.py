@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from typing import Protocol
 
 from docx import Document
 
@@ -20,6 +21,14 @@ DEFAULT_MAX_TOTAL_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_PDF_PAGES = 200
 DEFAULT_MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_DOCX_COMPRESSION_RATIO = 100.0
+
+
+class UploadedFile(Protocol):
+    """The part of Streamlit's UploadedFile this module actually uses."""
+
+    name: str
+
+    def getvalue(self) -> bytes: ...
 
 
 @dataclass
@@ -234,7 +243,7 @@ def _parse_document_payloads(
 
 
 def parse_uploaded_documents(
-    uploaded_files: Sequence[object],
+    uploaded_files: Sequence[UploadedFile],
     *,
     max_docs: int = DEFAULT_MAX_DOCS,
     max_chars_per_doc: int = DEFAULT_MAX_CHARS_PER_DOC,

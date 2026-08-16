@@ -16,7 +16,7 @@
 ## 功能特性
 
 - **多 Agent 工作流**：研究员、写作者、审核员分工协作。
-- **联网搜索**：支持遵循 OpenAI 协议的服务商的 Responses API `web_search_preview` 工具。
+- **联网搜索**：优先使用 Responses API 的 `web_search` 工具，对旧版兼容商自动回退到 `web_search_preview`。
 - **主题报告生成**：输入一个主题，自动搜索资料、整理观点、撰写报告并审核。
 - **图片识别**：上传截图、图表、论文页面或题目图片，先识别图片内容，再生成报告。
 - **文献分析**：上传 PDF / 文档，分阶段提取内容并生成文献综述或分析报告。
@@ -32,6 +32,7 @@ auto_report_agent/
 ├── app.py
 ├── src/
 │   └── auto_report_agent/
+│       ├── agent_events.py
 │       ├── api_config.py
 │       ├── cache_manager.py
 │       ├── crew.py
@@ -40,9 +41,11 @@ auto_report_agent/
 │       ├── main.py
 │       ├── openai_web_search_tool.py
 │       ├── pdf_export.py
+│       ├── run_manager.py
 │       ├── settings.py
 │       ├── staged_literature.py
 │       ├── vision.py
+│       ├── py.typed
 │       └── config/
 │           ├── agents.yaml
 │           └── tasks.yaml
@@ -202,6 +205,7 @@ pip install -e ".[dev]"
 ruff check .
 ruff format --check .
 python -m compileall -q app.py src tests
+mypy
 pytest -q
 ```
 

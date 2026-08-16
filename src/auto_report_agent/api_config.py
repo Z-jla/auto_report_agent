@@ -176,7 +176,7 @@ def validate_base_url(
                 }
             except socket.gaierror as exc:
                 raise ValueError(f"无法解析 API 主机：{host}") from exc
-            if not addresses or any(_is_disallowed_address(address) for address in addresses):
+            if not addresses or any(_is_disallowed_address(str(address)) for address in addresses):
                 raise ValueError("API 主机解析到了本机、私网或保留地址，已拒绝请求。")
 
     return normalized

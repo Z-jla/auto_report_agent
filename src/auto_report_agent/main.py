@@ -22,6 +22,7 @@ from auto_report_agent.cache_manager import enforce_retention  # noqa: E402
 from auto_report_agent.crew import AutoReportCrew  # noqa: E402
 from auto_report_agent.document_ingest import parse_document_paths  # noqa: E402
 from auto_report_agent.run_manager import (  # noqa: E402
+    RunPaths,
     create_run_paths,
     write_run_metadata,
     write_text_atomic,
@@ -129,7 +130,7 @@ def resolve_options(args: argparse.Namespace, *, prompt: Prompt = input) -> CliO
     return CliOptions(mode="topic", topic=topic)
 
 
-def generate_report(options: CliOptions) -> tuple[str, object]:
+def generate_report(options: CliOptions) -> tuple[str, RunPaths]:
     """Run the configured pipeline and return the report text and its run paths."""
     paper_context = ""
     if options.mode == "paper":

@@ -156,10 +156,12 @@ def analyze_image_content(
     except (BadRequestError, NotFoundError) as chat_error:
         # Chat Completions 拒绝请求或路径不存在，多半是兼容商把视觉接口放在 Responses API 上。
         try:
-            response = client.responses.create(
+            fallback = client.responses.create(
                 model=model,
+                # The SDK types this as a union of overloaded TypedDicts that a
+                # dict literal cannot match, though the payload is correct.
                 input=[
-                    {
+                    {  # type: ignore[misc, list-item]
                         "role": "user",
                         "content": [
                             {"type": "input_text", "text": prompt},
@@ -183,6 +185,6 @@ def analyze_image_content(
                 f" Chat Completions 错误：{chat_error}; Responses 错误：{responses_error}"
             ) from responses_error
 
-        if getattr(response, "output_text", None):
-            return response.output_text.strip()
+        if getattr(fallback, "output_text", None):
+            return fallback.output_text.strip()
         raise RuntimeError("图片识别失败：模型在 Responses 接口返回空内容。") from chat_error

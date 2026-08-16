@@ -16,7 +16,7 @@ The project is designed as a portfolio piece for AI Agent / multi-agent collabor
 ## Features
 
 - **Multi-agent workflow**: researcher, writer, and reviewer agents collaborate.
-- **Web search**: supports OpenAI-compatible providers exposing the Responses API `web_search_preview` tool.
+- **Web search**: prefers the Responses API `web_search` tool and falls back to the legacy `web_search_preview` for older compatible providers.
 - **Topic report**: given a topic, it searches, organizes material, drafts a report, and reviews it.
 - **Image understanding**: upload screenshots, charts, paper pages, or exam figures; the image is parsed before the report is drafted.
 - **Literature analysis**: upload PDFs / documents; content is extracted in stages and turned into a literature review or analytical report.
@@ -32,6 +32,7 @@ auto_report_agent/
 ├── app.py
 ├── src/
 │   └── auto_report_agent/
+│       ├── agent_events.py
 │       ├── api_config.py
 │       ├── cache_manager.py
 │       ├── crew.py
@@ -40,9 +41,11 @@ auto_report_agent/
 │       ├── main.py
 │       ├── openai_web_search_tool.py
 │       ├── pdf_export.py
+│       ├── run_manager.py
 │       ├── settings.py
 │       ├── staged_literature.py
 │       ├── vision.py
+│       ├── py.typed
 │       └── config/
 │           ├── agents.yaml
 │           └── tasks.yaml
@@ -202,6 +205,7 @@ pip install -e ".[dev]"
 ruff check .
 ruff format --check .
 python -m compileall -q app.py src tests
+mypy
 pytest -q
 ```
 
