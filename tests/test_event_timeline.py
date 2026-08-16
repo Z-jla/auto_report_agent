@@ -14,8 +14,8 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
-import app
-from app import AgentEvent, EventTimeline
+from app import EventTimeline
+from auto_report_agent.agent_events import AgentEvent, agent_icon
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -143,7 +143,7 @@ def test_label_includes_timestamp_icon_and_agent():
     label = container.status_container.markdowns[0]
     assert label.startswith("🛠️ ")
     assert "**researcher**" in label
-    assert app._agent_icon("researcher") in label
+    assert agent_icon("researcher") in label
     assert timeline.events[0].timestamp, "a timestamp should be filled in automatically"
 
 
