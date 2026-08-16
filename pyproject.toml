@@ -54,4 +54,6 @@ ignore = ["E501", "E402", "B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "." puts the repository root on sys.path so tests can import the Streamlit
+# entrypoint (app.py), which lives outside the installed package.
+pythonpath = ["src", "."]

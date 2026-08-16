@@ -209,20 +209,28 @@ def _parse_task_output(output: Any) -> AgentEvent:
 
 
 class EventTimeline:
-    """Grok 风格事件流：用 st.status + 折叠卡片实时展示 Agent 工作过程。"""
+    """Grok 风格事件流：用 st.status + 折叠卡片实时展示 Agent 工作过程。
+
+    Events are appended into a single ``st.status`` container as they arrive.
+    Re-rendering the whole list on every event would cost O(n^2) element
+    creations and websocket deltas, which visibly slows the page down on long
+    runs; only the header label is rewritten, which is O(1) per event.
+    """
 
     def __init__(self, container: Any, *, show_detail: bool = True) -> None:
-        self.placeholder = container.empty()
+        self.container = container
         self.events: list[AgentEvent] = []
         self.show_detail = show_detail
         self.is_running = True
         self.success: bool | None = None
+        self._status: Any | None = None
 
     def add(self, event: AgentEvent) -> None:
         if not event.timestamp:
             event.timestamp = datetime.now().strftime("%H:%M:%S")
         self.events.append(event)
-        self._render()
+        self._append_event(event)
+        self._refresh_header()
 
     def log(self, message: str, *, icon: str = "•", detail: str = "") -> None:
         """便捷方法：以系统消息身份加入 timeline。"""
@@ -231,7 +239,7 @@ class EventTimeline:
     def finalize(self, *, success: bool) -> None:
         self.is_running = False
         self.success = success
-        self._render()
+        self._refresh_header()
 
     def _top_label(self) -> str:
         n = len(self.events)
@@ -246,20 +254,28 @@ class EventTimeline:
             return "running"
         return "complete" if self.success else "error"
 
-    def _render(self) -> None:
-        with self.placeholder.container():
-            with st.status(
+    def _ensure_status(self) -> Any:
+        if self._status is None:
+            self._status = self.container.status(
                 self._top_label(),
                 state=self._top_state(),
                 expanded=True,
-            ):
-                for ev in self.events:
-                    label = self._format_label(ev)
-                    if ev.detail and self.show_detail:
-                        with st.expander(label, expanded=False):
-                            st.markdown(ev.detail)
-                    else:
-                        st.markdown(label)
+            )
+        return self._status
+
+    def _append_event(self, event: AgentEvent) -> None:
+        """Write one event into the status container, leaving earlier ones untouched."""
+        status = self._ensure_status()
+        label = self._format_label(event)
+        if event.detail and self.show_detail:
+            # Write through the returned container instead of `with`, so the
+            # detail lands in this expander regardless of the active context.
+            status.expander(label, expanded=False).markdown(event.detail)
+        else:
+            status.markdown(label)
+
+    def _refresh_header(self) -> None:
+        self._ensure_status().update(label=self._top_label(), state=self._top_state())
 
     @staticmethod
     def _format_label(ev: AgentEvent) -> str:
