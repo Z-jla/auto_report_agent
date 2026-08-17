@@ -179,3 +179,47 @@ def test_concurrent_builders_get_distinct_agents(no_llm_env):
     assert {id(a) for a in first.agents}.isdisjoint({id(a) for a in second.agents})
     assert first.agents[0].llm.model == "explicit-model"
     assert second.agents[0].llm.model == "other-model"
+
+
+# --- streaming ---------------------------------------------------------------
+# Report writing runs long enough that a buffered response gets dropped by
+# proxies that cut idle connections (~120s on Cloudflare-fronted relays), so
+# streaming is the default rather than an opt-in.
+
+
+def test_streaming_is_on_by_default(no_llm_env):
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    for agent in crew.agents:
+        assert agent.llm.stream is True
+
+
+def test_streaming_can_be_disabled(no_llm_env):
+    """Escape hatch for a provider whose SSE implementation is broken."""
+    no_llm_env.setenv("LLM_STREAM", "false")
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    for agent in crew.agents:
+        assert agent.llm.stream is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("1", True), ("on", True), ("0", False), ("no", False), ("off", False)],
+)
+def test_stream_flag_reads_the_usual_boolean_spellings(no_llm_env, value, expected):
+    no_llm_env.setenv("LLM_STREAM", value)
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    assert crew.agents[0].llm.stream is expected
+
+
+def test_unparseable_stream_flag_keeps_the_default(no_llm_env):
+    """A typo must not silently turn streaming off and reintroduce the timeout."""
+    no_llm_env.setenv("LLM_STREAM", "ture")
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    assert crew.agents[0].llm.stream is True

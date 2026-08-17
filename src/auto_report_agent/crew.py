@@ -1,6 +1,6 @@
 import os
 
-from auto_report_agent.settings import initialize_runtime
+from auto_report_agent.settings import env_bool, initialize_runtime
 
 initialize_runtime()
 
@@ -29,6 +29,14 @@ class AutoReportCrew:
         Passing it explicitly is what keeps a run off ``os.environ``. Left to
         itself CrewAI reads MODEL/OPENAI_* and silently substitutes its own
         default model when they are unset.
+
+        Streaming is on by default because report writing is exactly the shape of
+        request that reverse proxies cut off: many relays (Cloudflare-fronted ones
+        in particular) drop a connection that produces no bytes for ~120s, and a
+        buffered call returns nothing until the whole report is generated. Capping
+        output tokens does not help — the model is still silent while it works, so
+        the timeout fires anyway. A streamed response keeps bytes flowing and
+        survives. Set ``LLM_STREAM=false`` for a provider that mishandles SSE.
         """
         config = self._llm_config or resolve_llm_env()
         config.require("model")
@@ -39,6 +47,7 @@ class AutoReportCrew:
             api_key=config.api_key or None,
             base_url=config.base_url or None,
             api_base=config.base_url or None,
+            stream=env_bool("LLM_STREAM", True),
         )
 
     @agent

@@ -115,6 +115,9 @@ LLM_VISION_MODEL=
 # responses: Responses API (used for web search)
 LLM_API_MODE=chat
 
+# Stream model output; on by default, since buffered calls get cut off by proxies
+LLM_STREAM=true
+
 # Enable provider web search
 ENABLE_WEB_SEARCH=false
 
@@ -232,6 +235,16 @@ The web page is rendered by the browser's Markdown renderer; the PDF is rendered
 Literature analysis reads, summarizes, and merges in stages. When a document exceeds the chunk cap, chunks are sampled evenly from the beginning, middle, and end, and the coverage ratio is included in the merged material. Tune `PAPER_CHUNK_SIZE`, `PAPER_MAX_CHUNKS_PER_DOC`, etc. in `.env` to trade off cost and speed.
 
 Chunk summaries within one document are independent, so four of them run concurrently by default (`PAPER_STAGE_CONCURRENCY`, 1-16), measured at roughly 3x faster on a ten-chunk document. Set it to `1` for the previous serial behaviour if your provider quota is low and returns 429s. Cached chunks do not consume a concurrency slot.
+
+### 4. Generation fails partway through with "Connection error"
+
+Usually a relay or reverse proxy dropped a long request. Many relays — Cloudflare-fronted ones especially — close a connection that has produced no bytes for about 120 seconds, and writing a report regularly takes two or three minutes. A buffered request sends nothing until generation finishes, so the connection is closed first and the client only sees `Connection error`. The SDK retries twice by default, which is why this typically looks like "hung for six minutes, then failed".
+
+Streaming is on by default (`LLM_STREAM=true`) precisely to avoid this: bytes keep flowing, so the idle timeout never fires. If you turned it off and hit this error, set it back to `true`.
+
+Note that **lowering an output cap such as `max_tokens` does not work around it** — the model is equally silent while it works, so the timeout still fires.
+
+If short requests fail too, it is not this timeout: check that `LLM_BASE_URL` is reachable and the key is valid.
 
 ## License
 
