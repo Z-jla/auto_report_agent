@@ -1,12 +1,20 @@
+import socket
+from dataclasses import replace
+
 import pytest
 
 from auto_report_agent.api_config import ResolvedLLMConfig
 from auto_report_agent.crew import AutoReportCrew
+from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
 
 
 @pytest.fixture
 def llm_env(monkeypatch):
     """CrewAI validates agent config on construction and requires model/key env vars."""
+    # build_crew now runs the same SSRF checks as the other model callers, and
+    # these hosts are neither whitelisted nor resolvable. Local mode is what a
+    # developer running against their own endpoint would set anyway.
+    monkeypatch.setenv("APP_DEPLOYMENT_MODE", "local")
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
@@ -77,10 +85,32 @@ EXPLICIT = ResolvedLLMConfig(
     enable_web_search=False,
 )
 
+# The only combination in which the search tool can actually do anything.
+SEARCH_ON = ResolvedLLMConfig(
+    api_key="explicit-key",
+    base_url="https://explicit.example/v1",
+    model="explicit-model",
+    vision_model="",
+    api_mode="responses",
+    enable_web_search=True,
+)
+
+
+def _researcher(crew):
+    return next(a for a in crew.agents if "研究员" in a.role)
+
+
+def _search_tool(built):
+    return next(
+        (t for t in (getattr(built, "tools", None) or []) if isinstance(t, OpenAIWebSearchTool)),
+        None,
+    )
+
 
 @pytest.fixture
 def no_llm_env(monkeypatch):
     """Strip every variable CrewAI would otherwise fall back to."""
+    monkeypatch.setenv("APP_DEPLOYMENT_MODE", "local")  # see llm_env
     for key in (
         "LLM_API_KEY",
         "LLM_BASE_URL",
@@ -119,10 +149,10 @@ def test_every_agent_shares_one_llm(no_llm_env):
 
 def test_search_tool_receives_the_same_config(no_llm_env):
     """Otherwise the tool would fall back to reading the environment itself."""
-    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
-    researcher = next(a for a in crew.agents if "研究员" in a.role)
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=SEARCH_ON)
 
-    tool = researcher.tools[0]
+    tool = _search_tool(_researcher(crew))
+    assert tool is not None
     assert tool.llm_config is not None
     assert tool.llm_config.api_key == "explicit-key"
 
@@ -223,3 +253,121 @@ def test_unparseable_stream_flag_keeps_the_default(no_llm_env):
     crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
 
     assert crew.agents[0].llm.stream is True
+
+
+# --- web search tool ---------------------------------------------------------
+# An attached-but-unusable tool is not inert: the researcher calls it, reads the
+# same "skipped" notice back, and calls it again until it runs out of iterations.
+
+
+def test_search_tool_is_dropped_when_search_is_off(no_llm_env):
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    assert _search_tool(_researcher(crew)) is None
+
+
+def test_search_tool_is_dropped_on_the_chat_api(no_llm_env):
+    """web_search needs the Responses API, so the flag alone is not enough."""
+    chat_with_search = replace(SEARCH_ON, api_mode="chat")
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=chat_with_search)
+
+    assert _search_tool(_researcher(crew)) is None
+
+
+def test_search_tool_is_kept_when_usable(no_llm_env):
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=SEARCH_ON)
+
+    assert _search_tool(_researcher(crew)) is not None
+
+
+def test_research_task_forbids_searching_when_the_tool_is_gone(no_llm_env):
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    description = crew.tasks[0].description
+    assert "没有联网检索能力" in description
+    assert "openai_web_search" not in description
+
+
+def test_research_task_names_the_tool_when_it_is_available(no_llm_env):
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=SEARCH_ON)
+
+    assert "openai_web_search" in crew.tasks[0].description
+
+
+def test_directive_is_not_stacked_when_a_builder_is_reused(no_llm_env):
+    """@task memoizes on the builder, so a second build must not append twice."""
+    builder = AutoReportCrew()
+
+    builder.build_crew(mode="topic", llm_config=EXPLICIT)
+    crew = builder.build_crew(mode="topic", llm_config=EXPLICIT)
+
+    assert crew.tasks[0].description.count("检索方式：") == 1
+
+
+def test_reused_builder_can_switch_the_directive(no_llm_env):
+    builder = AutoReportCrew()
+
+    builder.build_crew(mode="topic", llm_config=EXPLICIT)
+    crew = builder.build_crew(mode="topic", llm_config=SEARCH_ON)
+
+    assert "openai_web_search" in crew.tasks[0].description
+    assert "没有联网检索能力" not in crew.tasks[0].description
+
+
+def test_paper_mode_needs_no_directive(no_llm_env, monkeypatch):
+    """research_task is not part of the paper pipeline."""
+    monkeypatch.setenv("PAPER_CREW_MODE", "fast")
+
+    crew = AutoReportCrew().build_crew(mode="paper", llm_config=EXPLICIT)
+
+    assert all("检索方式：" not in task.description for task in crew.tasks)
+
+
+# --- base URL validation -----------------------------------------------------
+# staged_literature and the search tool already validate; the crew used to be the
+# one path that would talk to any host, so the same .env behaved differently
+# depending on which mode you ran.
+
+
+def test_public_mode_refuses_an_unlisted_host(no_llm_env):
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    no_llm_env.delenv("APP_ALLOWED_API_HOSTS", raising=False)
+
+    with pytest.raises(RuntimeError, match="APP_ALLOWED_API_HOSTS"):
+        AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+
+def test_public_mode_accepts_a_whitelisted_host(no_llm_env):
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    no_llm_env.setenv("APP_ALLOWED_API_HOSTS", "explicit.example")
+    no_llm_env.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    assert crew.agents[0].llm.base_url == "https://explicit.example/v1"
+
+
+def test_public_mode_refuses_a_plain_http_host(no_llm_env):
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    no_llm_env.setenv("APP_ALLOWED_API_HOSTS", "explicit.example")
+    insecure = replace(EXPLICIT, base_url="http://explicit.example/v1")
+
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        AutoReportCrew().build_crew(mode="topic", llm_config=insecure)
+
+
+def test_blank_base_url_is_left_to_the_provider_default(no_llm_env):
+    """Someone using the real OpenAI endpoint sets no base URL at all."""
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    blank = replace(EXPLICIT, base_url="")
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=blank)
+
+    assert crew.agents[0].llm.base_url is None

@@ -134,6 +134,7 @@ APP_DEPLOYMENT_MODE=public
 - `APP_DEPLOYMENT_MODE=public` (the safe default): never pre-fills the browser with a server-side key, accepts only public HTTPS API hosts, and disables global cache cleanup.
 - `APP_DEPLOYMENT_MODE=local`: for a trusted single-user machine; permits `http://localhost`, Ollama, vLLM, and private API hosts.
 - Public mode permits the built-in provider hosts plus custom hosts in `APP_ALLOWED_API_HOSTS` (wildcards such as `*.example.com` are supported). Private endpoints require both an allowlist entry and `APP_ALLOW_PRIVATE_API_HOSTS=true`; enable this only in a trusted environment.
+- The allowlist covers **every** model call, topic mode and literature mode alike. With a self-hosted or niche relay in public mode you must add its hostname to `APP_ALLOWED_API_HOSTS` (or just use `APP_DEPLOYMENT_MODE=local` for local development), otherwise the run fails while the crew is being assembled with "Base URL 安全校验未通过".
 - Defaults: 10 MB per image, 5 documents, 25 MB per document, 50 MB total, and 200 PDF pages. The `MAX_*` variables in `.env.example` tune these limits; Streamlit also enforces a 50 MB pre-application upload ceiling.
 
 ## Run the frontend
@@ -225,6 +226,8 @@ pytest -q
 ### 1. Why do some compatible providers not support web search?
 
 Plain Chat Completions only generates text; it does not imply web search. The project prefers the Responses API `web_search` tool and falls back to `web_search_preview` for older compatible providers.
+
+The tool is attached to the researcher only when the backend interface is `responses` *and* web search is enabled. Otherwise it is removed outright and the researcher answers from its own knowledge, stating in the source list that it cannot provide live links. Leaving an unusable tool in place is not harmless: the researcher calls it, reads the same "skipped" notice back, and calls it again, spending iterations and tokens on a loop that cannot progress.
 
 ### 2. Why do the PDF and the web page not look exactly the same?
 

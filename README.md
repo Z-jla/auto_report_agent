@@ -134,6 +134,7 @@ APP_DEPLOYMENT_MODE=public
 - `APP_DEPLOYMENT_MODE=public`（默认安全策略）：页面不会预填服务器 `.env` 中的 Key，只允许 HTTPS 公网 API 地址，并禁用全局缓存清理。
 - `APP_DEPLOYMENT_MODE=local`：适合本机单用户使用，允许 `http://localhost`、Ollama、vLLM 等本地或私网接口。
 - 公共模式允许页面内置服务商域名，并叠加 `APP_ALLOWED_API_HOSTS` 中的自定义主机（支持 `*.example.com`）。访问私网接口需要同时设置主机白名单和 `APP_ALLOW_PRIVATE_API_HOSTS=true`，且只应在受信环境中开启。
+- 白名单对**所有**模型调用生效，主题模式和文献模式一视同仁。用自建或小众中转时，公共模式下必须把它的主机名加进 `APP_ALLOWED_API_HOSTS`（本机开发直接用 `APP_DEPLOYMENT_MODE=local` 更省事），否则任务在组装阶段就会报「Base URL 安全校验未通过」。
 - 默认限制为：图片 10 MB、最多 5 篇文献、单篇 25 MB、合计 50 MB、PDF 200 页。可通过 `.env.example` 中的 `MAX_*` 变量调整，Streamlit 服务器还有 50 MB 的请求前置上限。
 
 ## 运行前端
@@ -225,6 +226,8 @@ pytest -q
 ### 1. 为什么有的兼容服务不能联网搜索？
 
 普通 Chat Completions 只负责文本生成，不等于具备联网搜索。项目优先使用 OpenAI Responses API 的 `web_search` 工具；对旧兼容商会回退到 `web_search_preview`。
+
+只有在「后端直连接口 = responses」且「联网搜索已勾选」时，搜索工具才会挂到研究员身上；其余情况下工具会被直接摘掉，研究员改为基于自身知识作答，并在来源清单里说明无法提供实时链接。这样做是因为留着一个用不了的工具并非无害——研究员会反复调用它、反复读到同一条「已跳过」提示，白白耗掉迭代次数和 token。
 
 ### 2. PDF 和网页显示不完全一样怎么办？
 
