@@ -10,6 +10,11 @@ updates:
         dependency-type: production
       python-development:
         dependency-type: development
+    # CrewAI 1.x currently requires openai<3. Keep Dependabot from proposing
+    # an untestable OpenAI major until the runtime stack supports it.
+    ignore:
+      - dependency-name: openai
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
