@@ -65,7 +65,14 @@ testpaths = ["tests"]
 pythonpath = ["src", "."]
 
 [tool.mypy]
-python_version = "3.10"
+# python_version is deliberately left unpinned so each CI job checks against the
+# interpreter it runs on. Pinning it to the floor made mypy parse every file
+# under those rules, dependency stubs included: numpy 2.5 (a transitive
+# crewai/streamlit dependency, installed on 3.12 and 3.13) uses PEP 695 `type`
+# statements, which are a syntax error before 3.12. mypy reported that stub as
+# the one error and stopped — "errors prevented further checking" — so no
+# project code was checked at all. The matrix still covers 3.10 through 3.13,
+# and the 3.10 job guards the floor declared in requires-python.
 files = ["src/auto_report_agent", "app.py"]
 # Third-party packages here (crewai, streamlit, litellm) ship incomplete or
 # absent stubs, so imports are checked structurally rather than against them.
