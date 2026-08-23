@@ -1,5 +1,7 @@
 import os
 import shutil
+import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -13,9 +15,11 @@ from auto_report_agent.cache_manager import (
     _pycache_dirs,
     clean_cache,
     enforce_retention,
+    enforce_retention_periodically,
     format_bytes,
     scan_cache,
     total_cache_bytes,
+    touch_retention_entry,
 )
 from auto_report_agent.settings import PROJECT_ROOT
 
@@ -99,6 +103,7 @@ def retention_roots(monkeypatch, tmp_path: Path):
     runs.mkdir(parents=True)
     namespaces.mkdir(parents=True)
     monkeypatch.setattr(cache_manager, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cache_manager, "CREWAI_STORAGE_DIR", tmp_path / ".crewai_storage")
     monkeypatch.setattr(cache_manager, "retention_roots", lambda: [runs, namespaces])
     return runs, namespaces
 
@@ -169,6 +174,41 @@ def test_recent_nested_write_keeps_the_directory(retention_roots):
     assert namespace.exists()
 
 
+def test_recent_deep_chunk_write_keeps_a_stale_namespace(retention_roots):
+    """The real namespace/document/chunks/file layout must not be misclassified."""
+    _, namespaces = retention_roots
+    now = time.time()
+    namespace = _aged_dir(namespaces, "session", age_days=30, now=now)
+    chunk_dir = namespace / "document" / "chunks"
+    chunk_dir.mkdir(parents=True)
+    chunk = chunk_dir / "fresh.md"
+    chunk.write_text("new summary", encoding="utf-8")
+
+    # Restore stale mtimes above the actual payload.  A one-level scan sees only
+    # stale metadata even though a real cache write just completed.
+    stale = now - 30 * DAY
+    for path in (chunk_dir, chunk_dir.parent, namespace):
+        os.utime(path, (stale, stale))
+
+    assert enforce_retention(retention_days=7, now=now).removed_dirs == 0
+    assert chunk.exists()
+
+
+def test_heartbeat_keeps_a_stale_namespace_without_deep_scan(monkeypatch, retention_roots):
+    _, namespaces = retention_roots
+    now = time.time()
+    namespace = _aged_dir(namespaces, "session", age_days=30, now=now)
+    touch_retention_entry(namespace, when=now)
+
+    def unexpected_walk(_path):
+        raise AssertionError("fresh heartbeat should avoid a recursive walk")
+
+    monkeypatch.setattr(cache_manager.os, "walk", unexpected_walk)
+
+    assert enforce_retention(retention_days=7, now=now).removed_dirs == 0
+    assert namespace.exists()
+
+
 def test_retention_ignores_loose_files(retention_roots):
     runs, _ = retention_roots
     now = time.time()
@@ -182,11 +222,255 @@ def test_retention_ignores_loose_files(retention_roots):
     assert result.removed_dirs == 0
 
 
+def test_failed_quarantine_deletion_is_retried_without_another_rename(monkeypatch, retention_roots):
+    runs, _ = retention_roots
+    now = time.time()
+    stale_run = _aged_dir(runs, "locked_run", age_days=30, now=now)
+    real_rmtree = shutil.rmtree
+    attempts = 0
+
+    def fail_once(path):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("file is still open")
+        real_rmtree(path)
+
+    monkeypatch.setattr(cache_manager.shutil, "rmtree", fail_once)
+
+    first = enforce_retention(retention_days=7, now=now)
+    quarantines = list(runs.iterdir())
+
+    assert first.removed_dirs == 0
+    assert first.errors
+    assert not stale_run.exists()
+    assert len(quarantines) == 1
+    quarantine_name = quarantines[0].name
+
+    second = enforce_retention(retention_days=7, now=now)
+
+    assert second.removed_dirs == 1
+    assert second.errors == []
+    assert attempts == 2
+    assert not any(runs.iterdir())
+    assert quarantine_name.startswith(cache_manager._RETENTION_QUARANTINE_PREFIX)
+
+
+def test_repeated_quarantine_failures_keep_the_name_bounded(monkeypatch, retention_roots):
+    runs, _ = retention_roots
+    now = time.time()
+    _aged_dir(runs, "locked_run", age_days=30, now=now)
+
+    def always_fail(_path):
+        raise PermissionError("file is still open")
+
+    monkeypatch.setattr(cache_manager.shutil, "rmtree", always_fail)
+
+    names: list[str] = []
+    for _ in range(12):
+        result = enforce_retention(retention_days=7, now=now)
+        quarantines = list(runs.iterdir())
+        assert result.removed_dirs == 0
+        assert result.errors
+        assert len(quarantines) == 1
+        names.append(quarantines[0].name)
+
+    assert len(set(names)) == 1
+    assert names[0].startswith(cache_manager._RETENTION_QUARANTINE_PREFIX)
+    assert len(names[0]) < 80
+
+
 def test_retention_tolerates_a_missing_root(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cache_manager, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cache_manager, "CREWAI_STORAGE_DIR", tmp_path / ".crewai_storage")
     monkeypatch.setattr(cache_manager, "retention_roots", lambda: [tmp_path / "nope"])
 
     assert enforce_retention(retention_days=1).removed_dirs == 0
+
+
+def test_public_retention_removes_legacy_crewai_task_output_storage(monkeypatch, tmp_path: Path):
+    storage = tmp_path / ".crewai_storage"
+    storage.mkdir()
+    database = storage / cache_manager.CREWAI_TASK_OUTPUT_DB_NAME
+    artifacts = [
+        database,
+        Path(f"{database}-journal"),
+        Path(f"{database}-wal"),
+        Path(f"{database}-shm"),
+    ]
+    for index, artifact in enumerate(artifacts, start=1):
+        artifact.write_bytes(b"x" * index)
+
+    monkeypatch.setattr(cache_manager, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cache_manager, "CREWAI_STORAGE_DIR", storage)
+    monkeypatch.setattr(cache_manager, "retention_roots", lambda: [])
+    monkeypatch.setenv("APP_DEPLOYMENT_MODE", "public")
+    monkeypatch.delenv("CREWAI_PERSIST_TASK_OUTPUTS", raising=False)
+
+    # A zero output-retention window disables run eviction, but persistence=false
+    # is itself a privacy policy and must still scrub historical shared outputs.
+    result = enforce_retention(retention_days=0)
+
+    assert not any(path.exists() for path in artifacts)
+    assert result.removed_files == 4
+    assert result.removed_bytes == 10
+    assert result.errors == []
+
+
+def test_persistent_crewai_records_follow_retention_window(monkeypatch, tmp_path: Path):
+    storage = tmp_path / ".crewai_storage"
+    storage.mkdir()
+    database = storage / cache_manager.CREWAI_TASK_OUTPUT_DB_NAME
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE latest_kickoff_task_outputs ("
+            "task_id TEXT PRIMARY KEY, timestamp DATETIME, output TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO latest_kickoff_task_outputs VALUES (?, ?, ?)",
+            [
+                ("old", "2020-01-01 00:00:00", "secret-old-output-marker"),
+                ("fresh", "2030-01-01 00:00:00", "fresh output"),
+            ],
+        )
+
+    monkeypatch.setattr(cache_manager, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cache_manager, "CREWAI_STORAGE_DIR", storage)
+    monkeypatch.setattr(cache_manager, "retention_roots", lambda: [])
+    monkeypatch.setenv("APP_DEPLOYMENT_MODE", "local")
+    monkeypatch.delenv("CREWAI_PERSIST_TASK_OUTPUTS", raising=False)
+
+    real_connect = sqlite3.connect
+    opened_connections = []
+
+    class TrackingConnection:
+        def __init__(self, delegate):
+            self.delegate = delegate
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+        def close(self):
+            self.closed = True
+            self.delegate.close()
+
+    def tracking_connect(*args, **kwargs):
+        tracked = TrackingConnection(real_connect(*args, **kwargs))
+        opened_connections.append(tracked)
+        return tracked
+
+    monkeypatch.setattr(cache_manager.sqlite3, "connect", tracking_connect)
+
+    result = enforce_retention(retention_days=7, now=1_800_000_000)
+
+    with real_connect(database) as connection:
+        task_ids = [
+            row[0] for row in connection.execute("SELECT task_id FROM latest_kickoff_task_outputs")
+        ]
+    assert task_ids == ["fresh"]
+    assert b"secret-old-output-marker" not in database.read_bytes()
+    assert result.removed_records == 1
+    assert result.errors == []
+    assert opened_connections and all(connection.closed for connection in opened_connections)
+
+
+def test_persistent_wal_reader_makes_incomplete_physical_scrub_observable(
+    monkeypatch, tmp_path: Path
+):
+    storage = tmp_path / ".crewai_storage"
+    storage.mkdir()
+    database = storage / cache_manager.CREWAI_TASK_OUTPUT_DB_NAME
+    real_connect = sqlite3.connect
+    setup = real_connect(database)
+    try:
+        setup.execute("PRAGMA journal_mode=WAL")
+        setup.execute(
+            "CREATE TABLE latest_kickoff_task_outputs ("
+            "task_id TEXT PRIMARY KEY, timestamp DATETIME, output TEXT)"
+        )
+        setup.execute(
+            "INSERT INTO latest_kickoff_task_outputs VALUES (?, ?, ?)",
+            ("old", "2020-01-01 00:00:00", "secret held by WAL reader"),
+        )
+        setup.commit()
+    finally:
+        setup.close()
+
+    reader = real_connect(database)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM latest_kickoff_task_outputs").fetchall()
+    try:
+        monkeypatch.setattr(cache_manager, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(cache_manager, "CREWAI_STORAGE_DIR", storage)
+        monkeypatch.setattr(cache_manager, "retention_roots", lambda: [])
+        monkeypatch.setenv("APP_DEPLOYMENT_MODE", "local")
+        monkeypatch.delenv("CREWAI_PERSIST_TASK_OUTPUTS", raising=False)
+
+        def fast_connect(path, *, timeout=2):
+            return real_connect(path, timeout=0.05)
+
+        monkeypatch.setattr(cache_manager.sqlite3, "connect", fast_connect)
+        result = enforce_retention(retention_days=7, now=1_800_000_000)
+    finally:
+        reader.close()
+
+    assert result.removed_records == 1
+    assert any("VACUUM" in error or "checkpoint" in error for error in result.errors)
+
+
+def test_periodic_retention_is_process_rate_limited(monkeypatch):
+    calls: list[tuple[int | None, float | None]] = []
+
+    def fake_enforce(*, retention_days=None, now=None):
+        calls.append((retention_days, now))
+        return cache_manager.RetentionResult(0, 0, [])
+
+    monkeypatch.setattr(cache_manager, "enforce_retention", fake_enforce)
+    monkeypatch.setattr(cache_manager, "_last_retention_sweep", None)
+
+    first = enforce_retention_periodically(
+        min_interval_seconds=60, retention_days=5, now=100, monotonic_now=10
+    )
+    skipped = enforce_retention_periodically(
+        min_interval_seconds=60, retention_days=5, now=110, monotonic_now=20
+    )
+    later = enforce_retention_periodically(
+        min_interval_seconds=60, retention_days=5, now=170, monotonic_now=70
+    )
+
+    assert first is not None
+    assert skipped is None
+    assert later is not None
+    assert calls == [(5, 100), (5, 170)]
+
+
+def test_periodic_retention_does_not_run_concurrently(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    completed: list[object] = []
+
+    def slow_enforce(*, retention_days=None, now=None):
+        entered.set()
+        assert release.wait(timeout=2)
+        return cache_manager.RetentionResult(0, 0, [])
+
+    monkeypatch.setattr(cache_manager, "enforce_retention", slow_enforce)
+    monkeypatch.setattr(cache_manager, "_last_retention_sweep", None)
+
+    worker = threading.Thread(
+        target=lambda: completed.append(
+            enforce_retention_periodically(min_interval_seconds=0, monotonic_now=1)
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=2)
+    skipped = enforce_retention_periodically(min_interval_seconds=0, monotonic_now=1)
+    release.set()
+    worker.join(timeout=2)
+
+    assert skipped is None
+    assert len(completed) == 1
 
 
 # --- clean_cache -------------------------------------------------------------

@@ -1,12 +1,23 @@
 import os
+from copy import copy as shallow_copy
+from typing import Any
 
-from auto_report_agent.settings import env_bool, initialize_runtime
+from auto_report_agent.settings import (
+    crewai_task_output_persistence_enabled,
+    crewai_verbose_enabled,
+    env_bool,
+    initialize_runtime,
+)
 
 initialize_runtime()
 
 from crewai import LLM, Agent, Crew, Process, Task  # noqa: E402
 from crewai.agents.agent_builder.base_agent import BaseAgent  # noqa: E402
 from crewai.project import CrewBase, agent, crew, task  # noqa: E402
+from crewai.utilities.task_output_storage_handler import (  # noqa: E402
+    TaskOutputStorageHandler,
+)
+from pydantic import PrivateAttr  # noqa: E402
 
 from auto_report_agent.api_config import (  # noqa: E402
     ResolvedLLMConfig,
@@ -26,6 +37,105 @@ _SEARCH_UNAVAILABLE_DIRECTIVE = (
     "请完全基于你已掌握的知识作答，并在「来源清单」中如实说明本次无法提供实时链接、"
     "信息可能存在时效性局限。"
 )
+
+
+class _EphemeralTaskOutputHandler:
+    """CrewAI task-output handler that deliberately retains nothing.
+
+    CrewAI currently has no public constructor flag for disabling its replay
+    database.  This implements the small handler interface the 1.x Crew class
+    calls, keeping public requests out of the process-global SQLite file.  The
+    methods accept future-compatible extra arguments because this is a privacy
+    boundary: an added optional argument should not silently restore disk
+    persistence after a dependency upgrade.
+    """
+
+    def reset(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def update(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def add(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def load(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def _new_task_output_handler() -> TaskOutputStorageHandler | _EphemeralTaskOutputHandler:
+    if crewai_task_output_persistence_enabled():
+        return TaskOutputStorageHandler()
+    return _EphemeralTaskOutputHandler()
+
+
+class _PrivacyAwareCrew(Crew):
+    """Crew variant whose replay storage follows this app's deployment policy.
+
+    Overriding the Pydantic private-attribute factory is important: replacing
+    the handler *after* constructing a normal ``Crew`` would already have
+    created/opened ``latest_kickoff_task_outputs.db``.
+    """
+
+    _task_output_handler: Any = PrivateAttr(default_factory=_new_task_output_handler)
+
+    def copy(self) -> Crew:  # type: ignore[override]
+        """Clone without falling back to CrewAI's persistent base ``Crew``.
+
+        CrewAI 1.x hard-codes ``Crew(...)`` in its copy implementation. Batch,
+        async, train, and test helpers call that method internally, which would
+        silently restore the shared replay SQLite handler in public mode.
+        This mirrors the upstream component-aware copy while retaining this
+        privacy-aware subclass.
+        """
+        exclude = {
+            "id",
+            "_rpm_controller",
+            "_logger",
+            "_execution_span",
+            "_file_handler",
+            "_cache_handler",
+            "_memory",
+            "agents",
+            "tasks",
+            "knowledge_sources",
+            "knowledge",
+            "manager_agent",
+            "manager_llm",
+        }
+        cloned_agents = [agent.copy() for agent in self.agents]
+        manager_agent = self.manager_agent.copy() if self.manager_agent else None
+        manager_llm = shallow_copy(self.manager_llm) if self.manager_llm else None
+        task_mapping: dict[str, Any] = {}
+        cloned_tasks = []
+
+        for original_task in self.tasks:
+            cloned_task = original_task.copy(cloned_agents, task_mapping)
+            cloned_tasks.append(cloned_task)
+            task_mapping[original_task.key] = cloned_task
+
+        for cloned_task, original_task in zip(cloned_tasks, self.tasks, strict=False):
+            if isinstance(original_task.context, list):
+                cloned_task.context = [
+                    task_mapping[context_task.key] for context_task in original_task.context
+                ]
+
+        copied_data = self.model_dump(exclude=exclude)
+        copied_data = {key: value for key, value in copied_data.items() if value is not None}
+        if getattr(self, "_memory", None):
+            copied_data["memory"] = self._memory
+        copied_data.pop("agents", None)
+        copied_data.pop("tasks", None)
+
+        return _PrivacyAwareCrew(
+            **copied_data,
+            agents=cloned_agents,
+            tasks=cloned_tasks,
+            knowledge_sources=shallow_copy(self.knowledge_sources),
+            knowledge=shallow_copy(self.knowledge),
+            manager_agent=manager_agent,
+            manager_llm=manager_llm,
+        )
 
 
 @CrewBase
@@ -88,28 +198,28 @@ class AutoReportCrew:
         return Agent(
             config=self.agents_config["researcher"],
             tools=[OpenAIWebSearchTool()],
-            verbose=True,
+            verbose=crewai_verbose_enabled(),
         )
 
     @agent
     def writer(self) -> Agent:
         return Agent(
             config=self.agents_config["writer"],
-            verbose=True,
+            verbose=crewai_verbose_enabled(),
         )
 
     @agent
     def reviewer(self) -> Agent:
         return Agent(
             config=self.agents_config["reviewer"],
-            verbose=True,
+            verbose=crewai_verbose_enabled(),
         )
 
     @agent
     def paper_analyst(self) -> Agent:
         return Agent(
             config=self.agents_config["paper_analyst"],
-            verbose=True,
+            verbose=crewai_verbose_enabled(),
         )
 
     @task
@@ -210,11 +320,11 @@ class AutoReportCrew:
         if research_task is not None:
             self._apply_search_directive(research_task, enabled=search_enabled)
 
-        return Crew(
+        return _PrivacyAwareCrew(
             agents=agents,
             tasks=tasks,
             process=Process.sequential,
-            verbose=True,
+            verbose=crewai_verbose_enabled(),
         )
 
     def _apply_search_tool(self, built: BaseAgent, *, enabled: bool) -> None:

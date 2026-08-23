@@ -3,8 +3,9 @@ from dataclasses import replace
 
 import pytest
 
+from auto_report_agent import crew as crew_module
 from auto_report_agent.api_config import ResolvedLLMConfig
-from auto_report_agent.crew import AutoReportCrew
+from auto_report_agent.crew import AutoReportCrew, _EphemeralTaskOutputHandler
 from auto_report_agent.openai_web_search_tool import OpenAIWebSearchTool
 
 
@@ -67,9 +68,32 @@ def test_final_task_interpolates_isolated_output_path(llm_env, monkeypatch, mode
             "paper_instruction": "instruction",
             "mode": mode,
             "output_file": output_file,
+            "draft_file": "output/runs/safe_run_123/draft_report.md",
         }
     )
 
+    assert crew.tasks[-1].output_file == output_file
+    if mode == "paper":
+        assert crew.tasks[-2].output_file == "output/runs/safe_run_123/draft_report.md"
+
+
+def test_full_paper_writer_persists_a_recoverable_draft(llm_env, monkeypatch):
+    monkeypatch.setenv("PAPER_CREW_MODE", "full")
+    crew = AutoReportCrew().build_crew(mode="paper")
+    output_file = "output/runs/safe_run_123/final_report.md"
+
+    crew._interpolate_inputs(
+        {
+            "topic": "topic",
+            "paper_context": "context",
+            "paper_instruction": "instruction",
+            "mode": "paper",
+            "output_file": output_file,
+            "draft_file": "output/runs/safe_run_123/draft_report.md",
+        }
+    )
+
+    assert crew.tasks[-2].output_file == "output/runs/safe_run_123/draft_report.md"
     assert crew.tasks[-1].output_file == output_file
 
 
@@ -126,6 +150,8 @@ def no_llm_env(monkeypatch):
         "MODEL_NAME",
         "BASE_URL",
         "API_BASE",
+        "CREWAI_VERBOSE",
+        "CREWAI_PERSIST_TASK_OUTPUTS",
     ):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch
@@ -253,6 +279,71 @@ def test_unparseable_stream_flag_keeps_the_default(no_llm_env):
     crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
 
     assert crew.agents[0].llm.stream is True
+
+
+# --- public logging and replay privacy --------------------------------------
+
+
+def test_public_mode_disables_crewai_verbose_by_default(no_llm_env):
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    config = replace(EXPLICIT, base_url="")
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=config)
+
+    assert crew.verbose is False
+    assert all(agent.verbose is False for agent in crew.agents)
+
+
+def test_public_mode_can_explicitly_enable_crewai_verbose(no_llm_env):
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    no_llm_env.setenv("CREWAI_VERBOSE", "true")
+    config = replace(EXPLICIT, base_url="")
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=config)
+
+    assert crew.verbose is True
+    assert all(agent.verbose is True for agent in crew.agents)
+
+
+def test_local_mode_preserves_crewai_verbose_default(no_llm_env):
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=EXPLICIT)
+
+    assert crew.verbose is True
+    assert all(agent.verbose is True for agent in crew.agents)
+
+
+def test_public_mode_never_constructs_sqlite_task_output_handler(no_llm_env, monkeypatch):
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    config = replace(EXPLICIT, base_url="")
+
+    def unexpected_handler():
+        raise AssertionError("public mode must not initialise CrewAI's shared SQLite DB")
+
+    monkeypatch.setattr(crew_module, "TaskOutputStorageHandler", unexpected_handler)
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=config)
+
+    assert isinstance(crew._task_output_handler, _EphemeralTaskOutputHandler)
+    assert crew._task_output_handler.load() is None
+
+    cloned = crew.copy()
+    assert isinstance(cloned, crew_module._PrivacyAwareCrew)
+    assert isinstance(cloned._task_output_handler, _EphemeralTaskOutputHandler)
+
+
+def test_public_mode_can_explicitly_enable_task_output_persistence(no_llm_env, monkeypatch):
+    no_llm_env.setenv("APP_DEPLOYMENT_MODE", "public")
+    no_llm_env.setenv("CREWAI_PERSIST_TASK_OUTPUTS", "true")
+    config = replace(EXPLICIT, base_url="")
+
+    class FakePersistentHandler:
+        pass
+
+    monkeypatch.setattr(crew_module, "TaskOutputStorageHandler", FakePersistentHandler)
+
+    crew = AutoReportCrew().build_crew(mode="topic", llm_config=config)
+
+    assert isinstance(crew._task_output_handler, FakePersistentHandler)
 
 
 # --- web search tool ---------------------------------------------------------

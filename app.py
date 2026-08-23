@@ -8,7 +8,15 @@ from typing import Any
 
 import streamlit as st
 
-from auto_report_agent.settings import env_bool, env_int, initialize_runtime
+from auto_report_agent.settings import (
+    HARD_MAX_DOWNSTREAM_TOPIC_CHARS,
+    MAX_INSTRUCTION_CHARS,
+    MAX_TOPIC_CHARS,
+    env_bool,
+    env_int,
+    initialize_runtime,
+    validate_text_length,
+)
 
 initialize_runtime()
 
@@ -30,7 +38,7 @@ from auto_report_agent.api_config import (  # noqa: E402
 from auto_report_agent.cache_manager import (  # noqa: E402
     CacheStats,
     clean_cache,
-    enforce_retention,
+    enforce_retention_periodically,
     format_bytes,
     scan_cache,
     total_cache_bytes,
@@ -45,10 +53,15 @@ from auto_report_agent.pdf_export import markdown_to_pdf_bytes  # noqa: E402
 from auto_report_agent.run_manager import (  # noqa: E402
     RunPaths,
     create_run_paths,
+    discard_intermediate_draft,
+    handle_failed_report_files,
     write_run_metadata,
     write_text_atomic,
 )
-from auto_report_agent.staged_literature import summarize_documents_staged  # noqa: E402
+from auto_report_agent.staged_literature import (  # noqa: E402
+    HARD_MAX_PAPER_CONTEXT_CHARS,
+    summarize_documents_staged,
+)
 from auto_report_agent.vision import analyze_image_content, validate_image_bytes  # noqa: E402
 
 ProgressCallback = Callable[[str], None]
@@ -152,6 +165,21 @@ def generate_report(
     run_paths: RunPaths | None = None,
 ) -> str:
     """运行 CrewAI 工作流并返回最终报告文本。"""
+    topic = validate_text_length(
+        topic,
+        label="报告主题",
+        maximum=HARD_MAX_DOWNSTREAM_TOPIC_CHARS,
+    )
+    paper_instruction = validate_text_length(
+        paper_instruction,
+        label="文献分析要求",
+        maximum=MAX_INSTRUCTION_CHARS,
+    )
+    paper_context = validate_text_length(
+        paper_context,
+        label="文献分析上下文",
+        maximum=HARD_MAX_PAPER_CONTEXT_CHARS,
+    )
     if timeline:
         if mode == "paper":
             timeline.log("启动 CrewAI：按 文献分析 → 写作 → 审核 顺序执行。", icon="🚀")
@@ -192,18 +220,15 @@ def generate_report(
                 "paper_instruction": paper_instruction,
                 "mode": mode,
                 "output_file": paths.report_file.as_posix(),
+                "draft_file": paths.draft_file.as_posix(),
             }
         )
     except Exception:
         keep_paper_draft = mode == "paper" and env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True)
-        if keep_paper_draft and paths.report_file.exists():
+        preserved = handle_failed_report_files(paths, keep_draft=keep_paper_draft)
+        if preserved is not None:
             if timeline:
                 timeline.log("生成过程失败，但已保留当前文献草稿用于下载/手动检查。", icon="📝")
-        elif paths.report_file.exists():
-            try:
-                paths.report_file.unlink()
-            except OSError:
-                pass
         raise
 
     if timeline:
@@ -213,7 +238,13 @@ def generate_report(
         report_text = paths.report_file.read_text(encoding="utf-8")
     else:
         report_text = str(result)
-        write_text_atomic(paths.report_file, report_text)
+        if report_text.strip():
+            write_text_atomic(paths.report_file, report_text)
+    if not report_text.strip():
+        keep_paper_draft = mode == "paper" and env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True)
+        handle_failed_report_files(paths, keep_draft=keep_paper_draft)
+        raise RuntimeError("最终审核返回了空内容；文献模式下已按草稿保留策略处理。")
+    discard_intermediate_draft(paths)
 
     write_run_metadata(
         paths,
@@ -227,25 +258,93 @@ def generate_report(
     return report_text
 
 
+_TRUNCATION_MARKER = "\n\n> [内容已按字符上限裁剪；保留开头与结尾]\n\n"
+
+
+def _truncate_text_to_limit(value: str, maximum: int) -> str:
+    if len(value) <= maximum:
+        return value
+    if maximum <= len(_TRUNCATION_MARKER):
+        return value[:maximum]
+    remaining = maximum - len(_TRUNCATION_MARKER)
+    head_chars = (remaining + 1) // 2
+    tail_chars = remaining - head_chars
+    tail = value[-tail_chars:] if tail_chars else ""
+    return f"{value[:head_chars]}{_TRUNCATION_MARKER}{tail}"
+
+
+def _strip_and_truncate_text(value: str, maximum: int) -> str:
+    """Strip and bound text without first copying an arbitrarily large middle."""
+    start = 0
+    end = len(value)
+    while start < end and value[start].isspace():
+        start += 1
+    while end > start and value[end - 1].isspace():
+        end -= 1
+    length = end - start
+    if length <= maximum:
+        return value[start:end]
+    if maximum <= len(_TRUNCATION_MARKER):
+        return value[start : start + maximum]
+    remaining = maximum - len(_TRUNCATION_MARKER)
+    head_chars = (remaining + 1) // 2
+    tail_chars = remaining - head_chars
+    return (
+        f"{value[start : start + head_chars]}"
+        f"{_TRUNCATION_MARKER}"
+        f"{value[end - tail_chars : end] if tail_chars else ''}"
+    )
+
+
 def build_topic_from_inputs(topic: str, image_analysis: str | None, image_instruction: str) -> str:
     if not image_analysis:
-        return topic.strip()
+        return _strip_and_truncate_text(topic, HARD_MAX_DOWNSTREAM_TOPIC_CHARS)
 
-    user_goal = topic.strip() or image_instruction.strip() or "请根据图片内容完成一份专业分析报告"
-    return f"""
-用户目标：{user_goal}
-
-用户上传了一张图片，系统已完成初步视觉识别。请基于下方图片识别结果，结合联网搜索，完成研究、写作和审核，输出一份高质量 Markdown 报告。
-如果图片中包含题目、需求、文档、图表、页面截图或论文信息，请优先围绕这些内容展开；如果需要补充最新资料，请联网搜索并保留来源。
-
-## 图片识别结果
-
-{image_analysis}
-""".strip()
+    user_goal = (
+        _strip_and_truncate_text(topic, MAX_TOPIC_CHARS)
+        or _strip_and_truncate_text(image_instruction, MAX_INSTRUCTION_CHARS)
+        or "请根据图片内容完成一份专业分析报告"
+    )
+    prefix = (
+        f"用户目标：{user_goal}\n\n"
+        "用户上传了一张图片，系统已完成初步视觉识别。请基于下方图片识别结果，结合联网搜索，"
+        "完成研究、写作和审核，输出一份高质量 Markdown 报告。\n"
+        "如果图片中包含题目、需求、文档、图表、页面截图或论文信息，请优先围绕这些内容展开；"
+        "如果需要补充最新资料，请联网搜索并保留来源。\n\n"
+        "## 图片识别结果\n\n"
+    )
+    analysis_budget = HARD_MAX_DOWNSTREAM_TOPIC_CHARS - len(prefix)
+    bounded_analysis = _truncate_text_to_limit(image_analysis, max(analysis_budget, 0))
+    combined = f"{prefix}{bounded_analysis}"
+    return validate_text_length(
+        combined,
+        label="报告主题",
+        maximum=HARD_MAX_DOWNSTREAM_TOPIC_CHARS,
+    )
 
 
 def build_paper_topic(topic: str, paper_instruction: str) -> str:
-    return topic.strip() or paper_instruction.strip() or "上传文献分析与总结"
+    return (
+        _strip_and_truncate_text(topic, MAX_TOPIC_CHARS)
+        or _strip_and_truncate_text(paper_instruction, MAX_TOPIC_CHARS)
+        or "上传文献分析与总结"
+    )
+
+
+def load_preserved_draft(*, mode: str, paths: RunPaths) -> str:
+    """Return the best readable paper artifact after a failed run."""
+    if mode != "paper" or not env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True):
+        return ""
+    # A reviewer may have written the complete final before a later CrewAI hook
+    # failed. Prefer it while retaining the separate writer draft on disk.
+    for path in (paths.report_file, paths.draft_file):
+        try:
+            draft = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if draft.strip():
+            return draft
+    return ""
 
 
 @st.cache_data(show_spinner=False, max_entries=16, ttl=3600)
@@ -522,15 +621,17 @@ def main() -> None:
     if "session_id" not in st.session_state:
         st.session_state.session_id = secrets.token_hex(16)
 
-    if "retention_swept" not in st.session_state:
-        # Runs and per-session literature caches are never reclaimed otherwise,
-        # and public deployments hide the manual cleanup UI entirely.
-        st.session_state.retention_swept = True
-        sweep = enforce_retention()
-        if sweep.removed_dirs:
+    # Streamlit reruns this on every interaction. The helper applies a process-
+    # wide lock and interval, so long-lived sessions get periodic cleanup while
+    # concurrent new sessions cannot amplify the same global disk sweep.
+    sweep = enforce_retention_periodically()
+    if sweep is not None:
+        if sweep.removed_dirs or sweep.removed_files or sweep.removed_records:
             LOGGER.info(
-                "Retention sweep removed %d directories (%d bytes)",
+                "Retention sweep removed %d directories, %d files, %d records (%d bytes)",
                 sweep.removed_dirs,
+                sweep.removed_files,
+                sweep.removed_records,
                 sweep.removed_bytes,
             )
         for message in sweep.errors:
@@ -555,6 +656,7 @@ def main() -> None:
         topic = st.text_input(
             "请输入报告主题或任务目标",
             placeholder="例如：给我找最新的深度学习关于 Agent 的论文",
+            max_chars=MAX_TOPIC_CHARS,
         )
         uploaded_image = st.file_uploader(
             "上传图片（可选）",
@@ -582,16 +684,19 @@ def main() -> None:
                 "针对图片的补充指令（可选）",
                 placeholder="例如：识别图中的论文标题并帮我找相关最新研究；或根据截图内容写一份分析报告。",
                 height=90,
+                max_chars=MAX_INSTRUCTION_CHARS,
             )
     else:
         topic = st.text_input(
             "请输入文献主题或综述方向（可选）",
             placeholder="例如：多智能体系统在软件工程中的研究进展",
+            max_chars=MAX_TOPIC_CHARS,
         )
         paper_instruction = st.text_area(
             "请输入文献分析要求",
             placeholder="例如：请总结每篇文献的研究问题、方法、实验结果、创新点和局限性，并给出综合对比。",
             height=120,
+            max_chars=MAX_INSTRUCTION_CHARS,
         )
         uploaded_papers = st.file_uploader(
             "上传文献文件",
@@ -748,6 +853,12 @@ def main() -> None:
                 timeline.log("报告生成失败。", icon="❌")
                 timeline.finalize(success=False)
                 st.error("报告生成失败，请检查 API Key、模型能力、网络连接或终端报错。")
+                draft = load_preserved_draft(mode=mode, paths=run_paths)
+                if draft:
+                    st.warning("最终审核未完成，但已保留当前文献草稿，可先下载或手动检查。")
+                    render_download_buttons(draft, prefix="草稿")
+                    with st.expander("查看失败前保留的文献草稿", expanded=False):
+                        st.markdown(draft)
                 _render_exception(exc)
                 return
 

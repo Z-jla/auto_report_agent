@@ -1,4 +1,5 @@
 import logging
+import os
 
 import pytest
 
@@ -109,6 +110,17 @@ def test_initialize_runtime_can_be_forced(fresh_runtime):
     initialize_runtime(force=True)
 
     assert calls == ["load", "load"]
+
+
+def test_crewai_storage_cannot_escape_the_managed_app_home(monkeypatch, tmp_path, caplog):
+    managed = tmp_path / "managed" / ".crewai_storage"
+    monkeypatch.setattr(settings, "CREWAI_STORAGE_DIR", managed)
+    monkeypatch.setenv("CREWAI_STORAGE_DIR", str(tmp_path / "unmanaged"))
+
+    settings.setup_local_crewai_paths()
+
+    assert os.environ["CREWAI_STORAGE_DIR"] == str(managed)
+    assert "Ignoring unmanaged CREWAI_STORAGE_DIR" in caplog.text
 
 
 # --- configure_logging -------------------------------------------------------

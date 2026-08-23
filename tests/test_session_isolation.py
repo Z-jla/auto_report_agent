@@ -173,3 +173,38 @@ def test_cache_is_partitioned_by_configuration(monkeypatch, isolated_cache):
     assert "model-alpha" in calls and "model-beta" in calls
     # The repeat alpha pass is served from cache; beta never reuses alpha's entries.
     assert calls.count("model-alpha") == calls.count("model-beta")
+
+
+def test_changing_only_api_key_does_not_reuse_previous_credentials_cache(
+    monkeypatch, isolated_cache
+):
+    calls: list[str] = []
+
+    def fake_call_model(prompt, *, config, **kwargs):
+        calls.append(config.api_key)
+        return f"summary from {config.api_key}"
+
+    monkeypatch.setattr(staged_literature, "_call_model", fake_call_model)
+    document = _document()
+
+    def config(api_key: str) -> ResolvedLLMConfig:
+        return ResolvedLLMConfig(
+            api_key=api_key,
+            base_url="https://same.example/v1",
+            model="same-model",
+            vision_model="",
+            api_mode="chat",
+            enable_web_search=False,
+        )
+
+    for api_key in ("key-first", "key-second", "key-first"):
+        summarize_documents_staged(
+            [document],
+            topic="主题",
+            instruction="要求",
+            cache_namespace="shared-namespace",
+            config=config(api_key),
+        )
+
+    assert calls.count("key-first") == 2
+    assert calls.count("key-second") == 2

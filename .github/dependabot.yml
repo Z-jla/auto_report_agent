@@ -14,7 +14,9 @@ updates:
     # an untestable OpenAI major until the runtime stack supports it.
     ignore:
       - dependency-name: openai
-        update-types: ["version-update:semver-major"]
+        # Grouped range updates can bypass semver-major classification. Keep an
+        # explicit boundary until CrewAI 1.x itself permits OpenAI 3.x.
+        versions: [">=3.0.0"]
 
   - package-ecosystem: github-actions
     directory: "/"

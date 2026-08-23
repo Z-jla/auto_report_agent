@@ -131,8 +131,15 @@ def _set_default_font(doc, qn, Pt) -> None:
 
 _INLINE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("link", re.compile(r"\[([^\]]+)\]\(([^)]+)\)")),
-    ("bold", re.compile(r"\*\*(.+?)\*\*")),
-    ("italic", re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")),
+    ("bold_italic", re.compile(r"(?<!\*)\*\*\*(?!\*)(.+?)(?<!\*)\*\*\*(?!\*)")),
+    (
+        "bold",
+        re.compile(
+            r"(?<!\*)\*\*(?!\*)(.+?)(?<!\*)\*\*"
+            r"(?:(?!\*)|(?=\*[^*\n]+\*(?!\*)))"
+        ),
+    ),
+    ("italic", re.compile(r"\*([^*\n]+?)\*(?!\*)")),
     ("code", re.compile(r"`([^`]+)`")),
 )
 
@@ -158,6 +165,8 @@ def _parse_inline_spans(text: str) -> list[_InlineSpan]:
         if kind == "link":
             label, url = match.group(1), match.group(2)
             spans.append(_InlineSpan(text=f"{label} ({url})"))
+        elif kind == "bold_italic":
+            spans.append(_InlineSpan(text=match.group(1), bold=True, italic=True))
         elif kind == "bold":
             spans.append(_InlineSpan(text=match.group(1), bold=True))
         elif kind == "italic":

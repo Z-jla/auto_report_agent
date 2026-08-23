@@ -108,6 +108,8 @@ paper_writing_task:
     - 结论与启示
     - 文献引用列表
   agent: writer
+  output_file: "{draft_file}"
+  create_directory: true
   context:
     - paper_analysis_task
 
@@ -159,7 +161,7 @@ paper_direct_writing_task:
     - 参考文献/依据
     - 待核实或材料不足之处
   agent: writer
-  output_file: "{output_file}"
+  output_file: "{draft_file}"
   create_directory: true
 
 paper_direct_review_task:

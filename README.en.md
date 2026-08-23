@@ -131,8 +131,10 @@ APP_DEPLOYMENT_MODE=public
 
 ### Deployment mode and upload limits
 
-- `APP_DEPLOYMENT_MODE=public` (the safe default): never pre-fills the browser with a server-side key, accepts only public HTTPS API hosts, and disables global cache cleanup.
+- `APP_DEPLOYMENT_MODE=public` (the safe default): never pre-fills the browser with a server-side key, accepts only public HTTPS API hosts, and disables manual global cache cleanup.
 - `APP_DEPLOYMENT_MODE=local`: for a trusted single-user machine; permits `http://localhost`, Ollama, vLLM, and private API hosts.
+- CrewAI's detailed logs and replay SQLite database can contain prompts, uploads, and complete outputs. Public mode therefore disables both by default, while local mode enables both by default. Override this with `CREWAI_VERBOSE` or `CREWAI_PERSIST_TASK_OUTPUTS` only when you explicitly accept the corresponding disclosure or persistence risk.
+- To relocate outputs, caches, `.env`, and CrewAI state, set `AUTO_REPORT_HOME` in the system, container, or service environment **before** Python starts. Do not put it in the `.env` being relocated: the program must know the application directory before it can find that file. Older releases accepted a separate `CREWAI_STORAGE_DIR`; it is now ignored with a warning, so inspect the old directory manually for a leftover replay database.
 - Public mode permits the built-in provider hosts plus custom hosts in `APP_ALLOWED_API_HOSTS` (wildcards such as `*.example.com` are supported). Private endpoints require both an allowlist entry and `APP_ALLOW_PRIVATE_API_HOSTS=true`; enable this only in a trusted environment.
 - The allowlist covers **every** model call, topic mode and literature mode alike. With a self-hosted or niche relay in public mode you must add its hostname to `APP_ALLOWED_API_HOSTS` (or just use `APP_DEPLOYMENT_MODE=local` for local development), otherwise the run fails while the crew is being assembled with "Base URL 安全校验未通过".
 - Defaults: 10 MB per image, 5 documents, 25 MB per document, 50 MB total, and 200 PDF pages. The `MAX_*` variables in `.env.example` tune these limits; Streamlit also enforces a 50 MB pre-application upload ceiling.
@@ -198,9 +200,13 @@ The frontend also offers downloads for:
 
 Generated files are not committed by default. Streamlit only displays report history from the current browser session and does not load another session's run directory.
 
+In literature mode, the writing task saves a draft before final review. If a later step fails, the frontend keeps the best available artifact for download: a non-empty reviewed report is preferred without deleting the writer draft, while a missing or blank reviewed report is atomically replaced by the draft. Set `PAPER_KEEP_DRAFT_ON_FAILURE=false` to discard failed-run artifacts.
+
 ### Automatic cleanup
 
-Run directories and per-session literature caches accumulate indefinitely, and public mode disables the manual cleanup sidebar, so on startup the app deletes `output/runs/<run_id>/` entries and literature-cache namespaces older than `OUTPUT_RETENTION_DAYS` (default 7). Set it to `0` to disable. This is a disk-usage backstop rather than a precise cache policy: an evicted entry is simply recomputed on the next request.
+Run directories and per-session literature caches accumulate indefinitely, and public mode disables the manual cleanup sidebar. The frontend and CLI therefore periodically delete `output/runs/<run_id>/` entries and literature-cache namespaces older than `OUTPUT_RETENTION_DAYS` (default 7). A process scans at most once per hour by default; tune `OUTPUT_RETENTION_SWEEP_INTERVAL_SECONDS` if needed. Heartbeats protect active caches, and apparently stale entries get a final nested-file check. This is a disk-usage backstop rather than a precise cache policy: an evicted entry is recomputed on the next request.
+
+`OUTPUT_RETENTION_DAYS=0` disables only run-directory and literature-cache eviction. Public mode does not use CrewAI's cross-session task replay database by default and removes databases left by older versions. If `CREWAI_PERSIST_TASK_OUTPUTS` is explicitly enabled, its records follow the same retention window instead.
 
 ## Development and testing
 
@@ -218,6 +224,7 @@ pytest -q
 - Do not commit `.env`, API keys, logs, caches, or generated reports.
 - If an API key is accidentally pushed, revoke it immediately and rotate.
 - Public mode never sends a server key to the browser. Session settings are passed into each model call as an argument rather than written to process environment variables, so concurrent browser sessions neither share credentials nor wait on each other.
+- Public mode disables CrewAI verbose output and cross-session task replay persistence by default, keeping prompts, uploads, and reports out of shared logs and SQLite. If you explicitly enable either switch, treat the corresponding storage as sensitive data.
 - Base URLs are checked for scheme, host, DNS result, and private addresses; shared deployments should also configure a host allowlist.
 - Every report uses an isolated run directory. Literature caches include the browser session, model, base URL, API mode, prompt version, and generation settings.
 
@@ -238,6 +245,8 @@ The web page is rendered by the browser's Markdown renderer; the PDF is rendered
 Literature analysis reads, summarizes, and merges in stages. When a document exceeds the chunk cap, chunks are sampled evenly from the beginning, middle, and end, and the coverage ratio is included in the merged material. Tune `PAPER_CHUNK_SIZE`, `PAPER_MAX_CHUNKS_PER_DOC`, etc. in `.env` to trade off cost and speed.
 
 Chunk summaries within one document are independent, so four of them run concurrently by default (`PAPER_STAGE_CONCURRENCY`, 1-16), measured at roughly 3x faster on a ten-chunk document. Set it to `1` for the previous serial behaviour if your provider quota is low and returns 429s. Cached chunks do not consume a concurrency slot.
+
+Chunk, document, corpus, merge-fallback, and final `paper_context` text all have configurable character budgets plus non-configurable hard ceilings. This prevents an unexpectedly verbose compatible endpoint from overflowing the downstream context. The final material defaults to 60,000 characters and can be lowered with `PAPER_CONTEXT_MAX_CHARS`; see `.env.example` for the per-stage settings. When trimming is needed, every chunk/document label and its beginning and end receive a fair share, while document coverage notes are preserved separately in the final material.
 
 ### 4. Generation fails partway through with "Connection error"
 

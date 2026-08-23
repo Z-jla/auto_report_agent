@@ -5,9 +5,20 @@ and would need a live model. The point of the split is that everything deciding
 *what* to run is reachable without one.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
-from auto_report_agent.main import DEFAULT_PAPER_TOPIC, build_parser, resolve_options
+from auto_report_agent import main as main_module
+from auto_report_agent.main import (
+    DEFAULT_PAPER_TOPIC,
+    CliOptions,
+    build_parser,
+    generate_report,
+    resolve_options,
+)
+from auto_report_agent.run_manager import create_run_paths
+from auto_report_agent.settings import MAX_INSTRUCTION_CHARS, MAX_TOPIC_CHARS
 
 
 def _parse(*argv: str):
@@ -138,6 +149,50 @@ def test_empty_path_answer_is_rejected():
         _resolve("--mode", "paper", "--topic", "t", answers=["", " ; ; "])
 
 
+def test_cli_rejects_unbounded_topic_and_instruction_inputs():
+    with pytest.raises(ValueError, match="报告主题不能超过"):
+        _resolve("--mode", "topic", "--topic", "x" * (MAX_TOPIC_CHARS + 1))
+
+    with pytest.raises(ValueError, match="文献分析要求不能超过"):
+        _resolve(
+            "--mode",
+            "paper",
+            "--file",
+            "paper.pdf",
+            "--instruction",
+            "x" * (MAX_INSTRUCTION_CHARS + 1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (
+            CliOptions(mode="topic", topic="x" * (MAX_TOPIC_CHARS + 1)),
+            "报告主题不能超过",
+        ),
+        (
+            CliOptions(
+                mode="paper",
+                topic="topic",
+                instruction="x" * (MAX_INSTRUCTION_CHARS + 1),
+                file_paths=["paper.pdf"],
+            ),
+            "文献分析要求不能超过",
+        ),
+    ],
+)
+def test_generate_report_revalidates_direct_cli_options(monkeypatch, options, message):
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("document parsing and CrewAI must not run before input validation")
+
+    monkeypatch.setattr(main_module, "parse_document_paths", unexpected_call)
+    monkeypatch.setattr(main_module, "AutoReportCrew", unexpected_call)
+
+    with pytest.raises(ValueError, match=message):
+        generate_report(options)
+
+
 # --- parser surface ----------------------------------------------------------
 
 
@@ -163,3 +218,106 @@ def test_help_mentions_every_flag(capsys):
     help_text = capsys.readouterr().out
     for flag in ("--mode", "--topic", "--instruction", "--file", "--no-input"):
         assert flag in help_text
+
+
+def test_direct_cli_options_are_normalized_before_staged_analysis_and_crew(monkeypatch, tmp_path):
+    paths = create_run_paths(run_id="cli_validated_123", runs_dir=tmp_path)
+    captured = {}
+
+    def summarize(documents, *, topic, instruction, **kwargs):
+        captured["staged"] = (topic, instruction)
+        return SimpleNamespace(paper_context="bounded context")
+
+    class CapturingCrew:
+        def kickoff(self, *, inputs):
+            captured["crew"] = inputs
+            return "# report"
+
+    class Builder:
+        def build_crew(self, *, mode):
+            return CapturingCrew()
+
+    monkeypatch.setattr(main_module, "parse_document_paths", lambda *args, **kwargs: [object()])
+    monkeypatch.setattr(main_module, "summarize_documents_staged", summarize)
+    monkeypatch.setattr(main_module, "create_run_paths", lambda: paths)
+    monkeypatch.setattr(main_module, "AutoReportCrew", Builder)
+
+    generate_report(
+        CliOptions(
+            mode="paper",
+            topic="  topic  ",
+            instruction="  instruction  ",
+            file_paths=["paper.pdf"],
+        )
+    )
+
+    assert captured["staged"] == ("topic", "instruction")
+    assert captured["crew"]["topic"] == "topic"
+    assert captured["crew"]["paper_instruction"] == "instruction"
+
+
+@pytest.mark.parametrize("keep_draft", [True, False])
+def test_cli_applies_failed_paper_artifact_policy(monkeypatch, tmp_path, keep_draft):
+    paths = create_run_paths(run_id="cli_failed_123", runs_dir=tmp_path)
+
+    class FailingCrew:
+        def kickoff(self, *, inputs):
+            paths.draft_file.write_text("complete writer draft", encoding="utf-8")
+            paths.report_file.write_text("complete reviewed final", encoding="utf-8")
+            raise RuntimeError("review failed")
+
+    class Builder:
+        def build_crew(self, *, mode):
+            return FailingCrew()
+
+    monkeypatch.setattr(main_module, "parse_document_paths", lambda *args, **kwargs: [object()])
+    monkeypatch.setattr(
+        main_module,
+        "summarize_documents_staged",
+        lambda *args, **kwargs: SimpleNamespace(paper_context="context"),
+    )
+    monkeypatch.setattr(main_module, "create_run_paths", lambda: paths)
+    monkeypatch.setattr(main_module, "AutoReportCrew", Builder)
+    monkeypatch.setenv("PAPER_KEEP_DRAFT_ON_FAILURE", str(keep_draft).lower())
+
+    with pytest.raises(RuntimeError, match="review failed"):
+        generate_report(CliOptions(mode="paper", file_paths=["paper.pdf"]))
+
+    if keep_draft:
+        assert paths.report_file.read_text(encoding="utf-8") == "complete reviewed final"
+        assert paths.draft_file.read_text(encoding="utf-8") == "complete writer draft"
+    else:
+        assert not paths.draft_file.exists()
+        assert not paths.report_file.exists()
+
+
+def test_cli_does_not_discard_draft_when_successful_kickoff_writes_blank_final(
+    monkeypatch, tmp_path
+):
+    paths = create_run_paths(run_id="cli_blank_123", runs_dir=tmp_path)
+
+    class BlankFinalCrew:
+        def kickoff(self, *, inputs):
+            paths.draft_file.write_text("complete writer draft", encoding="utf-8")
+            paths.report_file.write_text("   \n", encoding="utf-8")
+            return ""
+
+    class Builder:
+        def build_crew(self, *, mode):
+            return BlankFinalCrew()
+
+    monkeypatch.setattr(main_module, "parse_document_paths", lambda *args, **kwargs: [object()])
+    monkeypatch.setattr(
+        main_module,
+        "summarize_documents_staged",
+        lambda *args, **kwargs: SimpleNamespace(paper_context="context"),
+    )
+    monkeypatch.setattr(main_module, "create_run_paths", lambda: paths)
+    monkeypatch.setattr(main_module, "AutoReportCrew", Builder)
+    monkeypatch.setenv("PAPER_KEEP_DRAFT_ON_FAILURE", "true")
+
+    with pytest.raises(RuntimeError, match="最终审核返回了空内容"):
+        generate_report(CliOptions(mode="paper", file_paths=["paper.pdf"]))
+
+    assert not paths.draft_file.exists()
+    assert paths.report_file.read_text(encoding="utf-8") == "complete writer draft"

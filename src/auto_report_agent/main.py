@@ -14,16 +14,25 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from auto_report_agent.settings import env_int, initialize_runtime
+from auto_report_agent.settings import (
+    MAX_INSTRUCTION_CHARS,
+    MAX_TOPIC_CHARS,
+    env_bool,
+    env_int,
+    initialize_runtime,
+    validate_text_length,
+)
 
 initialize_runtime()
 
-from auto_report_agent.cache_manager import enforce_retention  # noqa: E402
+from auto_report_agent.cache_manager import enforce_retention_periodically  # noqa: E402
 from auto_report_agent.crew import AutoReportCrew  # noqa: E402
 from auto_report_agent.document_ingest import parse_document_paths  # noqa: E402
 from auto_report_agent.run_manager import (  # noqa: E402
     RunPaths,
     create_run_paths,
+    discard_intermediate_draft,
+    handle_failed_report_files,
     write_run_metadata,
     write_text_atomic,
 )
@@ -111,6 +120,12 @@ def resolve_options(args: argparse.Namespace, *, prompt: Prompt = input) -> CliO
     if mode == "paper":
         topic = topic or ask_optional("请输入文献主题/综述方向（可留空）：")
         instruction = instruction or ask_optional("请输入补充分析要求（可留空）：")
+        topic = validate_text_length(topic, label="文献主题", maximum=MAX_TOPIC_CHARS)
+        instruction = validate_text_length(
+            instruction,
+            label="文献分析要求",
+            maximum=MAX_INSTRUCTION_CHARS,
+        )
         if not files:
             raw = ask("请输入文献文件路径，多个文件用英文分号 ; 分隔：", required_for="--file")
             files = [part.strip() for part in raw.split(";") if part.strip()]
@@ -127,11 +142,22 @@ def resolve_options(args: argparse.Namespace, *, prompt: Prompt = input) -> CliO
         topic = ask("请输入报告主题：", required_for="--topic")
     if not topic:
         raise ValueError("报告主题不能为空")
+    topic = validate_text_length(topic, label="报告主题", maximum=MAX_TOPIC_CHARS)
     return CliOptions(mode="topic", topic=topic)
 
 
 def generate_report(options: CliOptions) -> tuple[str, RunPaths]:
     """Run the configured pipeline and return the report text and its run paths."""
+    topic = validate_text_length(
+        options.topic,
+        label="文献主题" if options.mode == "paper" else "报告主题",
+        maximum=MAX_TOPIC_CHARS,
+    ).strip()
+    instruction = validate_text_length(
+        options.instruction,
+        label="文献分析要求",
+        maximum=MAX_INSTRUCTION_CHARS,
+    ).strip()
     paper_context = ""
     if options.mode == "paper":
         documents = parse_document_paths(
@@ -140,8 +166,8 @@ def generate_report(options: CliOptions) -> tuple[str, RunPaths]:
         )
         staged_result = summarize_documents_staged(
             documents,
-            topic=options.topic,
-            instruction=options.instruction,
+            topic=topic,
+            instruction=instruction,
             progress=lambda message: print(f"[文献分析] {message}"),
             cache_namespace="cli",
         )
@@ -150,26 +176,38 @@ def generate_report(options: CliOptions) -> tuple[str, RunPaths]:
     run_paths = create_run_paths()
     # Held for the whole run; see AutoReportCrew.build_crew.
     crew_builder = AutoReportCrew()
-    result = crew_builder.build_crew(mode=options.mode).kickoff(
-        inputs={
-            "topic": options.topic,
-            "paper_instruction": options.instruction,
-            "paper_context": paper_context,
-            "mode": options.mode,
-            "output_file": run_paths.report_file.as_posix(),
-        }
-    )
+    try:
+        result = crew_builder.build_crew(mode=options.mode).kickoff(
+            inputs={
+                "topic": topic,
+                "paper_instruction": instruction,
+                "paper_context": paper_context,
+                "mode": options.mode,
+                "output_file": run_paths.report_file.as_posix(),
+                "draft_file": run_paths.draft_file.as_posix(),
+            }
+        )
+    except Exception:
+        keep_draft = options.mode == "paper" and env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True)
+        handle_failed_report_files(run_paths, keep_draft=keep_draft)
+        raise
 
     if run_paths.report_file.exists():
         report_text = run_paths.report_file.read_text(encoding="utf-8")
     else:
         report_text = str(result)
-        write_text_atomic(run_paths.report_file, report_text)
+        if report_text.strip():
+            write_text_atomic(run_paths.report_file, report_text)
+    if not report_text.strip():
+        keep_draft = options.mode == "paper" and env_bool("PAPER_KEEP_DRAFT_ON_FAILURE", True)
+        handle_failed_report_files(run_paths, keep_draft=keep_draft)
+        raise RuntimeError("最终审核返回了空内容；文献模式下已按草稿保留策略处理。")
+    discard_intermediate_draft(run_paths)
 
     write_run_metadata(
         run_paths,
         {
-            "topic": options.topic,
+            "topic": topic,
             "mode": options.mode,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "char_count": len(report_text),
@@ -182,9 +220,16 @@ def run(argv: Sequence[str] | None = None) -> int:
     """运行自动报告生成流程。"""
     args = build_parser().parse_args(argv)
 
-    sweep = enforce_retention()
-    if sweep.removed_dirs:
-        print(f"[清理] 已删除 {sweep.removed_dirs} 个过期运行/缓存目录。")
+    sweep = enforce_retention_periodically()
+    if sweep is not None:
+        if sweep.removed_dirs or sweep.removed_files or sweep.removed_records:
+            print(
+                "[清理] 已删除 "
+                f"{sweep.removed_dirs} 个目录、{sweep.removed_files} 个文件、"
+                f"{sweep.removed_records} 条 CrewAI 回放记录。"
+            )
+        for message in sweep.errors:
+            print(f"[清理警告] {message}", file=sys.stderr)
 
     try:
         options = resolve_options(args)

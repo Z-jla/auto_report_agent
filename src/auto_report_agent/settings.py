@@ -11,9 +11,22 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 SOURCE_ROOT = PACKAGE_ROOT.parents[1]
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+MAX_TOPIC_CHARS = 2_000
+MAX_INSTRUCTION_CHARS = 4_000
+# A topic assembled from a user goal and model-produced image analysis is
+# necessarily larger than the user-entered topic, but it must still have a
+# non-configurable ceiling before it reaches CrewAI.
+HARD_MAX_DOWNSTREAM_TOPIC_CHARS = 16_000
 # Loggers this project writes through. app.py runs as "__main__" under
 # `streamlit run`, so it needs naming explicitly.
 _APP_LOGGER_NAMES = ("auto_report_agent", "app", "__main__")
+
+
+def validate_text_length(value: str, *, label: str, maximum: int) -> str:
+    """Return *value* unchanged, rejecting text beyond a fixed character limit."""
+    if len(value) > maximum:
+        raise ValueError(f"{label}不能超过 {maximum} 个字符")
+    return value
 
 
 def _default_app_home() -> Path:
@@ -88,6 +101,41 @@ def env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _uses_public_safety_defaults() -> bool:
+    """Return whether this process is serving an untrusted multi-user app.
+
+    Keep this tiny predicate in settings rather than importing ``api_config``
+    here: settings is imported while the runtime and API configuration modules
+    themselves are being initialised.  The definition intentionally mirrors
+    :func:`auto_report_agent.api_config.is_public_deployment`.
+    """
+    return os.getenv("APP_DEPLOYMENT_MODE", "public").strip().lower() != "local"
+
+
+def crewai_verbose_enabled() -> bool:
+    """Return whether CrewAI may print prompts, tool arguments and responses.
+
+    Those values can contain API inputs and report text, so a public deployment
+    opts out unless its operator explicitly accepts that exposure by setting
+    ``CREWAI_VERBOSE=true``.  Local deployments retain the historical verbose
+    default and can turn it off with the same flag.
+    """
+    return env_bool("CREWAI_VERBOSE", not _uses_public_safety_defaults())
+
+
+def crewai_task_output_persistence_enabled() -> bool:
+    """Return whether CrewAI's process-global replay database may be used.
+
+    CrewAI stores kickoff inputs and full task outputs in one SQLite database
+    under ``CREWAI_STORAGE_DIR``.  It is not scoped to a browser session, so it
+    is unsafe by default in public/multi-user deployments.  Operators who need
+    CrewAI replay can explicitly opt in with
+    ``CREWAI_PERSIST_TASK_OUTPUTS=true``; local deployments preserve replay by
+    default and may explicitly opt out.
+    """
+    return env_bool("CREWAI_PERSIST_TASK_OUTPUTS", not _uses_public_safety_defaults())
+
+
 def force_utf8_stdio() -> None:
     """Force UTF-8 stdio on Windows to avoid GBK console errors from CrewAI logs."""
     os.environ.setdefault("PYTHONUTF8", "1")
@@ -102,8 +150,28 @@ def force_utf8_stdio() -> None:
 
 
 def setup_local_crewai_paths() -> None:
-    """Keep CrewAI storage inside the application-data root."""
-    os.environ.setdefault("CREWAI_STORAGE_DIR", str(CREWAI_STORAGE_DIR))
+    """Keep CrewAI storage inside the managed application-data root.
+
+    Retention and privacy cleanup can only make guarantees for paths owned by
+    this application. ``AUTO_REPORT_HOME`` is the supported way to relocate all
+    writable state together, so an inherited CrewAI-only override must not send
+    replay data somewhere the cleanup code will never inspect.
+    """
+    managed = CREWAI_STORAGE_DIR.resolve()
+    configured = os.getenv("CREWAI_STORAGE_DIR", "").strip()
+    if configured:
+        try:
+            configured_path = Path(configured).expanduser().resolve()
+        except OSError:
+            configured_path = Path(configured)
+        if configured_path != managed:
+            logging.getLogger(__name__).warning(
+                "Ignoring unmanaged CREWAI_STORAGE_DIR=%s; using %s. "
+                "Inspect the old location for legacy replay data.",
+                configured_path,
+                managed,
+            )
+    os.environ["CREWAI_STORAGE_DIR"] = str(managed)
 
 
 def load_environment() -> bool:
@@ -184,8 +252,10 @@ def initialize_runtime(*, force: bool = False) -> None:
         return
 
     force_utf8_stdio()
-    setup_local_crewai_paths()
     load_environment()
+    # Load first so a legacy CREWAI_STORAGE_DIR in .env can be detected and
+    # warned about before the managed path overrides it.
+    setup_local_crewai_paths()
     normalize_llm_env()
     configure_logging()
     _INITIALIZED = True

@@ -10,7 +10,7 @@ license = { text = "MIT" }
 requires-python = ">=3.10,<3.14"
 keywords = ["crewai", "agent", "streamlit", "openai-compatible", "report-generation"]
 dependencies = [
-    "crewai>=1.0.0,<2.0.0",
+    "crewai>=1.15.17,<2.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
     "streamlit>=1.30.0,<2.0.0",
     "reportlab>=4.0.0,<6.0.0",
@@ -37,7 +37,7 @@ packages = ["src/auto_report_agent"]
 [project.optional-dependencies]
 dev = [
     "build>=1.2.0,<2.0.0",
-    "mypy>=1.11.0,<2.0.0",
+    "mypy>=1.11.0,<3.0.0",
     "pytest>=8.0.0,<10.0.0",
     "ruff>=0.9.0,<1.0.0",
 ]
@@ -82,4 +82,4 @@ warn_unused_ignores = true
 # descriptors mypy cannot model: it reports "missing positional argument self"
 # for every decorated call. Those 53 errors are all artifacts of the framework,
 # not of this code, and suppressing them individually would hide real ones.
-exclude = "src/auto_report_agent/crew\\.py"
+exclude = "src[\\\\/]auto_report_agent[\\\\/]crew\\.py$"

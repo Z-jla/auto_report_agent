@@ -1,3 +1,5 @@
+import json
+
 from auto_report_agent.api_config import ResolvedLLMConfig
 from auto_report_agent.document_ingest import ParsedDocument
 from auto_report_agent.staged_literature import (
@@ -67,7 +69,7 @@ def test_chunk_character_ranges_track_sequential_chunks():
     assert chunk_character_ranges(text, chunks) == [(1, 5), (8, 11), (14, 18)]
 
 
-def test_cache_path_changes_with_namespace_model_and_base_url():
+def test_cache_path_changes_with_namespace_model_base_url_and_api_key():
     document = ParsedDocument(
         name="paper.txt",
         extension=".txt",
@@ -77,11 +79,11 @@ def test_cache_path_changes_with_namespace_model_and_base_url():
         truncated=False,
     )
 
-    def cache_path(namespace: str, *, model: str, base_url: str):
+    def cache_path(namespace: str, *, model: str, base_url: str, api_key: str = "key-a"):
         # The identity now comes from the explicit config rather than ambient env.
         identity = _runtime_cache_identity(
             config=ResolvedLLMConfig(
-                api_key="k",
+                api_key=api_key,
                 base_url=base_url,
                 model=model,
                 vision_model="",
@@ -108,3 +110,31 @@ def test_cache_path_changes_with_namespace_model_and_base_url():
     assert baseline != cache_path("session-b", model="model-a", base_url="https://a.example/v1")
     assert baseline != cache_path("session-a", model="model-b", base_url="https://a.example/v1")
     assert baseline != cache_path("session-a", model="model-a", base_url="https://b.example/v1")
+    assert baseline != cache_path(
+        "session-a",
+        model="model-a",
+        base_url="https://a.example/v1",
+        api_key="key-b",
+    )
+
+
+def test_cache_identity_contains_only_one_way_credential_fingerprint():
+    secret = "sk-super-secret-value"
+    identity = _runtime_cache_identity(
+        config=ResolvedLLMConfig(
+            api_key=secret,
+            base_url="https://api.example/v1",
+            model="model",
+            vision_model="",
+            api_mode="chat",
+            enable_web_search=False,
+        ),
+        chunk_size=6000,
+        max_chunks_per_doc=10,
+        max_output_tokens=900,
+        merge_output_tokens=1400,
+    )
+
+    serialized = json.dumps(identity)
+    assert secret not in serialized
+    assert len(str(identity["api_key_fingerprint"])) == 64

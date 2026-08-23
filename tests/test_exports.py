@@ -106,6 +106,7 @@ def test_plain_text_is_a_single_span():
 def test_bold_italic_and_code_are_marked():
     assert _spans("**b**") == [("b", True, False, False)]
     assert _spans("*i*") == [("i", False, True, False)]
+    assert _spans("***bi***") == [("bi", True, True, False)]
     assert _spans("`c`") == [("c", False, False, True)]
 
 
@@ -136,9 +137,37 @@ def test_bold_is_not_mistaken_for_italic():
     assert _spans("**bold**") == [("bold", True, False, False)]
 
 
+@pytest.mark.parametrize("text", ["2 * 3 = 6", "a*b"])
+def test_bold_allows_literal_internal_asterisks(text: str):
+    assert _spans(f"**{text}**") == [(text, True, False, False)]
+
+
+def test_adjacent_bold_and_italic_delimiters_share_a_three_star_run():
+    assert _spans("**bold***italic*") == [
+        ("bold", True, False, False),
+        ("italic", False, True, False),
+    ]
+
+
+def test_bold_italic_preserves_surrounding_and_adjacent_emphasis():
+    assert _spans("前 ***粗斜体*** 后 **粗体**/*斜体*") == [
+        ("前 ", False, False, False),
+        ("粗斜体", True, True, False),
+        (" 后 ", False, False, False),
+        ("粗体", True, False, False),
+        ("/", False, False, False),
+        ("斜体", False, True, False),
+    ]
+
+
 def test_unbalanced_markers_stay_literal():
     assert _spans("**unclosed") == [("**unclosed", False, False, False)]
     assert _spans("a * b") == [("a * b", False, False, False)]
+
+
+@pytest.mark.parametrize("text", ["***unclosed", "***x**", "**x***", "****x****"])
+def test_bold_italic_requires_exact_balanced_marker_boundaries(text: str):
+    assert _spans(text) == [(text, False, False, False)]
 
 
 def test_empty_input_yields_no_spans():
@@ -160,3 +189,14 @@ def test_docx_renders_inline_styles_into_runs():
     styled = {r.text: (r.bold, r.font.name) for r in runs}
     assert styled["加粗"][0] is True
     assert styled["代码"][1] == "Consolas"
+
+
+def test_docx_renders_bold_italic_without_literal_markers():
+    document = Document(BytesIO(markdown_to_docx_bytes("普通 ***粗斜体*** 文字")))
+    paragraph = next(p for p in document.paragraphs if p.text.strip())
+
+    assert paragraph.text == "普通 粗斜体 文字"
+    assert "*" not in paragraph.text
+    combined = next(run for run in paragraph.runs if run.text == "粗斜体")
+    assert combined.bold is True
+    assert combined.italic is True
