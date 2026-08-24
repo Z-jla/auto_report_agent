@@ -13,6 +13,12 @@
 
 这个项目适合作为 AI Agent / 多 Agent 协作 / 自动化研究写作方向的实习作品展示。
 
+## 界面预览
+
+专业中文 AI 报告工作台，支持主题研究、图片理解、文献综述、Agent 执行过程展示，以及 Markdown / PDF / Word 多格式交付。截图使用演示配置，不包含可用 API 凭证。
+
+![Auto Report Agent 智能报告工作台](docs/images/workspace-preview.png)
+
 ## 功能特性
 
 - **多 Agent 工作流**：研究员、写作者、审核员分工协作。
@@ -38,6 +44,7 @@ auto_report_agent/
 │       ├── crew.py
 │       ├── document_ingest.py
 │       ├── docx_export.py
+│       ├── frontend.py
 │       ├── main.py
 │       ├── openai_web_search_tool.py
 │       ├── pdf_export.py
@@ -49,6 +56,9 @@ auto_report_agent/
 │       └── config/
 │           ├── agents.yaml
 │           └── tasks.yaml
+├── docs/
+│   └── images/
+│       └── workspace-preview.png
 ├── output/
 ├── tests/
 ├── .env.example

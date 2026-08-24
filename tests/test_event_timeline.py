@@ -111,6 +111,7 @@ def test_header_counts_steps_and_reports_success():
     updates = container.status_container.updates
     assert updates[-1]["state"] == "complete"
     assert updates[-1]["label"] == "🎉 完成 · 共 2 个步骤"
+    assert updates[-1]["expanded"] is False
     assert updates[0]["state"] == "running"
     assert "已记录 1 个步骤" in updates[0]["label"]
 
@@ -124,6 +125,7 @@ def test_header_reports_failure():
     last = container.status_container.updates[-1]
     assert last["state"] == "error"
     assert last["label"] == "❌ 出错 · 已记录 1 个步骤"
+    assert last["expanded"] is True
 
 
 def test_finalize_without_events_does_not_crash():

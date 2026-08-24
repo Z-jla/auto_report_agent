@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -49,6 +50,21 @@ from auto_report_agent.document_ingest import (  # noqa: E402
     parse_uploaded_documents,
 )
 from auto_report_agent.docx_export import markdown_to_docx_bytes  # noqa: E402
+from auto_report_agent.frontend import (  # noqa: E402
+    APP_STYLES,
+    SIDEBAR_BRAND_HTML,
+    api_fields_ready,
+    build_readiness_items,
+    can_generate,
+    hero_html,
+    mode_intro_html,
+    mode_presentation,
+    page_progress_html,
+    panel_title_html,
+    readiness_html,
+    report_meta_html,
+    section_heading_html,
+)
 from auto_report_agent.pdf_export import markdown_to_pdf_bytes  # noqa: E402
 from auto_report_agent.run_manager import (  # noqa: E402
     RunPaths,
@@ -66,6 +82,20 @@ from auto_report_agent.vision import analyze_image_content, validate_image_bytes
 
 ProgressCallback = Callable[[str], None]
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class TaskFormData:
+    mode: str
+    topic: str
+    uploaded_image: Any | None = None
+    uploaded_image_bytes: bytes | None = None
+    uploaded_image_mime: str = ""
+    image_upload_error: str = ""
+    image_instruction: str = ""
+    uploaded_papers: list[Any] | None = None
+    paper_instruction: str = ""
+    paper_upload_error: str = ""
 
 
 class EventTimeline:
@@ -135,7 +165,13 @@ class EventTimeline:
             status.markdown(label)
 
     def _refresh_header(self) -> None:
-        self._ensure_status().update(label=self._top_label(), state=self._top_state())
+        update: dict[str, object] = {
+            "label": self._top_label(),
+            "state": self._top_state(),
+        }
+        if not self.is_running:
+            update["expanded"] = not bool(self.success)
+        self._ensure_status().update(**update)
 
     @staticmethod
     def _format_label(ev: AgentEvent) -> str:
@@ -364,11 +400,12 @@ def _report_docx_bytes(report: str) -> bytes:
 
 def render_download_buttons(report: str, prefix: str = "") -> None:
     """渲染 Markdown / PDF / Word 下载按钮。"""
+    label_prefix = f"{prefix} · " if prefix else ""
     col_md, col_pdf, col_docx = st.columns(3)
 
     with col_md:
         st.download_button(
-            label=f"{prefix}下载 Markdown",
+            label=f"{label_prefix}下载 Markdown",
             data=report,
             file_name="final_report.md",
             mime="text/markdown",
@@ -382,7 +419,7 @@ def render_download_buttons(report: str, prefix: str = "") -> None:
             st.error(str(exc))
         else:
             st.download_button(
-                label=f"{prefix}下载 PDF",
+                label=f"{label_prefix}下载 PDF",
                 data=pdf_bytes,
                 file_name="final_report.pdf",
                 mime="application/pdf",
@@ -396,7 +433,7 @@ def render_download_buttons(report: str, prefix: str = "") -> None:
             st.error(str(exc))
         else:
             st.download_button(
-                label=f"{prefix}下载 Word",
+                label=f"{label_prefix}下载 Word",
                 data=docx_bytes,
                 file_name="final_report.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -415,9 +452,10 @@ def _cached_cache_scan() -> list[CacheStats]:
     return scan_cache()
 
 
-def render_cache_manager() -> None:
+def render_cache_manager(*, show_heading: bool = True, compact: bool = False) -> None:
     """Render cache quota monitor and manual cleanup controls in the sidebar."""
-    st.subheader("缓存管理")
+    if show_heading:
+        st.subheader("缓存管理")
     quota_mb = st.number_input(
         "缓存额度提醒（MB）",
         min_value=10,
@@ -438,7 +476,8 @@ def render_cache_manager() -> None:
         st.warning("缓存占用已超过你设置的额度提醒，可选择下方类别手动清理。")
 
     selected_keys: set[str] = set()
-    with st.expander("选择要清理的类别", expanded=False):
+
+    def render_cache_choices() -> None:
         for item in stats:
             checked = st.checkbox(
                 f"{item.label} · {format_bytes(item.bytes)} · {item.files} 文件",
@@ -448,6 +487,13 @@ def render_cache_manager() -> None:
             )
             if checked:
                 selected_keys.add(item.key)
+
+    if compact:
+        st.caption("选择需要清理的类别")
+        render_cache_choices()
+    else:
+        with st.expander("选择要清理的类别", expanded=False):
+            render_cache_choices()
 
     col_clean, col_refresh = st.columns(2)
     with col_clean:
@@ -474,7 +520,7 @@ def render_cache_manager() -> None:
             st.rerun()
 
 
-def render_api_config_panel() -> dict[str, str | bool]:
+def render_api_config_panel(*, show_heading: bool = True) -> dict[str, str | bool]:
     """Render session-only OpenAI-compatible API settings."""
     if "api_config" not in st.session_state:
         st.session_state.api_config = default_api_config(
@@ -482,67 +528,107 @@ def render_api_config_panel() -> dict[str, str | bool]:
         )
 
     current = dict(st.session_state.api_config)
-    st.subheader("API 配置")
-    st.caption(
-        "配置只保存在当前浏览器会话，不写入服务器 `.env`。公共模式不会向页面下发服务器 Key。"
-    )
+    if show_heading:
+        st.subheader("API 配置")
+    st.caption("选择服务商并填写当前会话使用的模型凭证。")
 
     provider_names = list(PROVIDER_PRESETS)
     current_provider = str(current.get("provider") or provider_names[0])
     if current_provider not in PROVIDER_PRESETS:
         current_provider = provider_names[0]
+        current["provider"] = current_provider
+
+    current_preset = PROVIDER_PRESETS[current_provider]
+
+    widget_defaults = {
+        "api_provider": current_provider,
+        "api_key_input": str(current.get("api_key") or ""),
+        "api_base_url": str(current.get("base_url") or current_preset.base_url),
+        "api_text_model": str(current.get("model") or ""),
+        "api_vision_model": str(current.get("vision_model") or ""),
+        "api_mode_input": str(current.get("api_mode") or "chat"),
+        "api_web_search": bool(current.get("enable_web_search")),
+    }
+    for key, value in widget_defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
     provider = st.selectbox(
         "服务商预设",
         provider_names,
-        index=provider_names.index(current_provider),
+        key="api_provider",
         help="这些预设都按 OpenAI-compatible 调用方式配置；也可以选择自定义。",
     )
     preset = PROVIDER_PRESETS[provider]
 
-    if provider != current.get("provider"):
-        current["provider"] = provider
-        if preset.base_url:
-            current["base_url"] = preset.base_url
-        current["api_mode"] = preset.api_mode
-        current["enable_web_search"] = preset.supports_web_search
+    provider_drafts = dict(st.session_state.get("api_provider_drafts") or {})
+    if provider != current_provider:
+        # Credentials and model names are provider-scoped. Persist the previous
+        # provider's draft, then restore only the selected provider's own values;
+        # this prevents a key from being sent to a different provider endpoint.
+        provider_drafts[current_provider] = {
+            "provider": current_provider,
+            "api_key": str(st.session_state.get("api_key_input") or "").strip(),
+            "base_url": str(st.session_state.get("api_base_url") or "").strip(),
+            "model": str(st.session_state.get("api_text_model") or "").strip(),
+            "vision_model": str(st.session_state.get("api_vision_model") or "").strip(),
+            "api_mode": str(st.session_state.get("api_mode_input") or "chat"),
+            "enable_web_search": bool(st.session_state.get("api_web_search")),
+        }
+        restored = dict(provider_drafts.get(provider) or {})
+        st.session_state.api_key_input = str(restored.get("api_key") or "")
+        st.session_state.api_base_url = str(restored.get("base_url") or preset.base_url)
+        st.session_state.api_text_model = str(restored.get("model") or "")
+        st.session_state.api_vision_model = str(restored.get("vision_model") or "")
+        st.session_state.api_mode_input = str(restored.get("api_mode") or preset.api_mode)
+        st.session_state.api_web_search = bool(
+            restored.get("enable_web_search", preset.supports_web_search)
+        )
+        st.session_state.api_base_url = preset.base_url
+        st.session_state.api_mode_input = preset.api_mode
+        st.session_state.api_web_search = preset.supports_web_search
 
     api_key = st.text_input(
         "API Key",
-        value=str(current.get("api_key") or ""),
+        key="api_key_input",
         type="password",
         placeholder="sk-...",
         help="仅用于当前会话调用模型；不要在公共电脑保存浏览器会话。",
     )
-    base_url = st.text_input(
-        "Base URL",
-        value=str(current.get("base_url") or preset.base_url),
-        placeholder="https://api.example.com/v1",
-        help="必须是 OpenAI-compatible 的 /v1 根地址。",
-    )
     model = st.text_input(
         "文本模型名",
-        value=str(current.get("model") or ""),
+        key="api_text_model",
         placeholder=preset.model_hint,
     )
-    vision_model = st.text_input(
-        "视觉模型名（可选）",
-        value=str(current.get("vision_model") or ""),
-        placeholder="留空则使用文本模型；如 qwen-vl-plus / gpt-4o-mini",
-    )
-    api_mode = st.radio(
-        "后端直连接口",
-        ["chat", "responses"],
-        index=1 if str(current.get("api_mode") or "chat") == "responses" else 0,
-        horizontal=True,
-        help="Chat Completions 兼容性最好；Responses 可启用 Web Search，但只有部分服务商支持。",
-    )
-    enable_web_search = st.checkbox(
-        "启用 Responses Web Search 联网搜索",
-        value=bool(current.get("enable_web_search")) and api_mode == "responses",
-        disabled=api_mode != "responses",
-        help="仅 OpenAI 或明确支持 Responses 工具调用的兼容商可用；普通兼容商请关闭。",
-    )
+
+    with st.expander(
+        "高级连接设置",
+        expanded=provider == "自定义 OpenAI-compatible",
+    ):
+        base_url = st.text_input(
+            "Base URL",
+            key="api_base_url",
+            placeholder="https://api.example.com/v1",
+            help="必须是 OpenAI-compatible 的 /v1 根地址。",
+        )
+        vision_model = st.text_input(
+            "视觉模型名（可选）",
+            key="api_vision_model",
+            placeholder="留空则使用文本模型；如 qwen-vl-plus / gpt-4o-mini",
+        )
+        api_mode = st.radio(
+            "API 调用方式",
+            ["chat", "responses"],
+            key="api_mode_input",
+            horizontal=True,
+            help="Chat Completions 兼容性最好；Responses 可启用 Web Search。",
+        )
+        enable_web_search = st.checkbox(
+            "启用 Responses Web Search",
+            key="api_web_search",
+            disabled=api_mode != "responses",
+            help="仅 OpenAI 或明确支持 Responses 工具调用的兼容商可用。",
+        )
 
     config: dict[str, str | bool] = {
         "provider": provider,
@@ -554,6 +640,8 @@ def render_api_config_panel() -> dict[str, str | bool]:
         "enable_web_search": enable_web_search and api_mode == "responses",
     }
     st.session_state.api_config = config
+    provider_drafts[provider] = dict(config)
+    st.session_state.api_provider_drafts = provider_drafts
 
     url_error = ""
     if config["base_url"]:
@@ -565,58 +653,316 @@ def render_api_config_panel() -> dict[str, str | bool]:
     if url_error:
         st.error(url_error)
     elif not config["api_key"] or not config["base_url"] or not config["model"]:
-        st.warning("请至少填写 API Key、Base URL 和文本模型名。")
+        st.warning("配置尚未完成，请检查 API Key、Base URL 和文本模型名。")
     else:
-        st.success("当前会话 API 已生效。")
+        st.success("配置已就绪，将在生成时验证连接。")
     st.caption(redacted_api_summary(config))
     return config
 
 
+def normalize_image_mime(mime_type: str) -> str:
+    normalized = str(mime_type or "").strip().lower()
+    return "image/jpeg" if normalized == "image/jpg" else normalized
+
+
+def is_api_config_ready(config: dict[str, str | bool]) -> bool:
+    if not api_fields_ready(config):
+        return False
+    try:
+        validate_base_url(str(config["base_url"]), resolve_dns=False)
+    except ValueError:
+        return False
+    return True
+
+
+def _restore_persistent_text_widget(widget_key: str, storage_key: str) -> None:
+    """Restore a conditionally rendered text widget from permanent session state."""
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = str(st.session_state.get(storage_key) or "")
+
+
+def _store_persistent_widget(widget_key: str, storage_key: str) -> None:
+    st.session_state[storage_key] = st.session_state.get(widget_key)
+
+
+def _clear_persistent_upload(storage_key: str) -> None:
+    st.session_state[storage_key] = None
+
+
+def render_sidebar() -> tuple[dict[str, str | bool], bool]:
+    with st.sidebar:
+        st.markdown(SIDEBAR_BRAND_HTML, unsafe_allow_html=True)
+        st.markdown("#### 模型连接")
+        api_config = render_api_config_panel(show_heading=False)
+
+        st.divider()
+        st.markdown("#### 执行偏好")
+        show_execution_details = st.toggle(
+            "显示详细执行日志",
+            value=False,
+            key="show_execution_details",
+            help="开启后可展开查看 Agent 的工具调用与可观察步骤；不会显示模型隐藏推理链。",
+        )
+        st.caption("运行区始终展示阶段摘要；详细日志默认折叠以便优先阅读结果。")
+
+        with st.expander("快速使用指南", expanded=False):
+            st.markdown(
+                """
+                1. 选择 **主题研究** 或 **文献综述**
+                2. 填写任务并添加可选素材
+                3. 确认就绪检查全部通过
+                4. 启动 Agent，等待写作与审核完成
+                5. 下载 Markdown、PDF 或 Word
+                """
+            )
+            st.caption("上传内容会发送给当前配置的模型服务商，请确认其隐私与数据政策。")
+
+        if is_public_deployment():
+            st.caption("公共部署模式 · 全局缓存清理已禁用")
+        else:
+            with st.expander("本地存储与缓存", expanded=False):
+                render_cache_manager(show_heading=False, compact=True)
+
+    return api_config, show_execution_details
+
+
+def render_task_form(mode: str) -> TaskFormData:
+    presentation = mode_presentation(mode)
+    input_column, asset_column = st.columns([1.15, 1], gap="large")
+
+    input_panel = input_column.container(border=True)
+    asset_panel = asset_column.container(border=True)
+
+    if mode == "topic":
+        with input_panel:
+            st.markdown(
+                panel_title_html(presentation.input_title, "主题与图片至少提供一项"),
+                unsafe_allow_html=True,
+            )
+            _restore_persistent_text_widget("topic_prompt", "topic_prompt_value")
+            topic = st.text_input(
+                "报告主题或任务目标",
+                placeholder="例如：AI Agent 在软件研发中的最新应用与落地挑战",
+                max_chars=MAX_TOPIC_CHARS,
+                key="topic_prompt",
+                on_change=_store_persistent_widget,
+                args=("topic_prompt", "topic_prompt_value"),
+            )
+            st.session_state.topic_prompt_value = topic
+            st.caption("建议写清目标读者、关注范围和希望得到的结论。")
+
+        with asset_panel:
+            st.markdown(
+                panel_title_html(presentation.asset_title, "PNG · JPG · WEBP"),
+                unsafe_allow_html=True,
+            )
+            uploaded_image = st.file_uploader(
+                "上传图片（可选）",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="topic_image",
+                label_visibility="collapsed",
+                help="支持截图、图表、论文页面、题目图片或产品页面。",
+                on_change=_store_persistent_widget,
+                args=("topic_image", "topic_image_value"),
+            )
+            retained_image = st.session_state.get("topic_image_value")
+            if uploaded_image is None and retained_image is not None:
+                uploaded_image = retained_image
+                retained_name = str(getattr(retained_image, "name", "已上传图片"))
+                st.info(f"已保留先前选择的图片：{retained_name}")
+                st.button(
+                    "移除已保留图片",
+                    key="remove_retained_topic_image",
+                    use_container_width=True,
+                    on_click=_clear_persistent_upload,
+                    args=("topic_image_value",),
+                )
+            uploaded_image_bytes: bytes | None = None
+            uploaded_image_mime = ""
+            image_upload_error = ""
+            if uploaded_image is not None:
+                uploaded_image_bytes = uploaded_image.getvalue()
+                uploaded_image_mime = normalize_image_mime(uploaded_image.type or "")
+                try:
+                    validate_image_bytes(
+                        uploaded_image_bytes,
+                        mime_type=uploaded_image_mime,
+                        max_bytes=env_int("MAX_IMAGE_MB", 10, 1, 50) * 1024 * 1024,
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    image_upload_error = str(exc)
+                    st.error(f"图片未通过校验：{image_upload_error}")
+                else:
+                    # Omitting the width keyword keeps this compatible with both
+                    # Streamlit 1.30 and releases that removed use_column_width.
+                    st.image(uploaded_image_bytes, caption="图片预览")
+            else:
+                st.caption(
+                    f"图片最大 {env_int('MAX_IMAGE_MB', 10, 1, 50)} MB；"
+                    "不上传时将直接围绕文字主题研究。"
+                )
+            st.caption("隐私提示：图片内容会发送至当前配置的模型服务商进行识别。")
+
+        image_instruction = ""
+        if uploaded_image is not None:
+            with input_panel:
+                _restore_persistent_text_widget("image_instruction", "image_instruction_value")
+                image_instruction = st.text_area(
+                    "图片补充指令（可选）",
+                    placeholder="例如：提取图表结论，并结合最新研究解释变化原因。",
+                    height=96,
+                    max_chars=MAX_INSTRUCTION_CHARS,
+                    key="image_instruction",
+                    on_change=_store_persistent_widget,
+                    args=("image_instruction", "image_instruction_value"),
+                )
+                st.session_state.image_instruction_value = image_instruction
+
+        return TaskFormData(
+            mode=mode,
+            topic=topic,
+            uploaded_image=uploaded_image,
+            uploaded_image_bytes=uploaded_image_bytes,
+            uploaded_image_mime=uploaded_image_mime,
+            image_upload_error=image_upload_error,
+            image_instruction=image_instruction,
+            uploaded_papers=[],
+        )
+
+    with input_panel:
+        st.markdown(
+            panel_title_html(presentation.input_title, "所有文字输入均可留空"),
+            unsafe_allow_html=True,
+        )
+        _restore_persistent_text_widget("paper_topic", "paper_topic_value")
+        topic = st.text_input(
+            "文献主题或综述方向（可选）",
+            placeholder="例如：多智能体系统在软件工程中的研究进展",
+            max_chars=MAX_TOPIC_CHARS,
+            key="paper_topic",
+            on_change=_store_persistent_widget,
+            args=("paper_topic", "paper_topic_value"),
+        )
+        st.session_state.paper_topic_value = topic
+        _restore_persistent_text_widget("paper_instruction", "paper_instruction_value")
+        paper_instruction = st.text_area(
+            "分析要求（可选）",
+            placeholder="例如：比较研究问题、方法、实验结果、创新点与局限性。",
+            height=132,
+            max_chars=MAX_INSTRUCTION_CHARS,
+            key="paper_instruction",
+            on_change=_store_persistent_widget,
+            args=("paper_instruction", "paper_instruction_value"),
+        )
+        st.session_state.paper_instruction_value = paper_instruction
+        st.caption("留空时会使用通用文献分析结构；写得越具体，最终报告越聚焦。")
+
+    with asset_panel:
+        st.markdown(
+            panel_title_html(presentation.asset_title, "PDF · DOCX · TXT · MD"),
+            unsafe_allow_html=True,
+        )
+        current_papers = list(
+            st.file_uploader(
+                "上传文献文件",
+                type=["pdf", "docx", "txt", "md"],
+                accept_multiple_files=True,
+                key="paper_files",
+                label_visibility="collapsed",
+                help="支持一次上传多篇文献。",
+                on_change=_store_persistent_widget,
+                args=("paper_files", "paper_files_value"),
+            )
+            or []
+        )
+        retained_papers = list(st.session_state.get("paper_files_value") or [])
+        uploaded_papers = current_papers or retained_papers
+        if not current_papers and retained_papers:
+            st.info(f"已保留先前选择的 {len(retained_papers)} 篇文献。")
+            st.button(
+                "移除已保留文献",
+                key="remove_retained_paper_files",
+                use_container_width=True,
+                on_click=_clear_persistent_upload,
+                args=("paper_files_value",),
+            )
+        max_documents = env_int("MAX_DOCUMENTS", 5, 1, 20)
+        max_file_mb = env_int("MAX_DOCUMENT_FILE_MB", 25, 1, 50)
+        max_total_mb = env_int("MAX_DOCUMENT_TOTAL_MB", 50, 1, 50)
+        paper_upload_error = ""
+        if uploaded_papers:
+            file_sizes = [int(getattr(item, "size", 0) or 0) for item in uploaded_papers]
+            total_bytes = sum(file_sizes)
+            if len(uploaded_papers) > max_documents:
+                paper_upload_error = f"文献数量超过上限，请保留不超过 {max_documents} 篇。"
+            elif any(size > max_file_mb * 1024 * 1024 for size in file_sizes):
+                paper_upload_error = f"存在超过 {max_file_mb} MB 单文件上限的文献。"
+            elif total_bytes > max_total_mb * 1024 * 1024:
+                paper_upload_error = f"文献总大小超过 {max_total_mb} MB 上限。"
+            if paper_upload_error:
+                st.error(paper_upload_error)
+            else:
+                st.success(f"已选择 {len(uploaded_papers)} 篇 · 合计约 {format_bytes(total_bytes)}")
+        st.caption(
+            f"最多 {max_documents} 篇 · 单篇不超过 {max_file_mb} MB · 总计不超过 {max_total_mb} MB"
+        )
+        st.caption("超长文献会均匀覆盖开头、中部与结尾，并按阶段生成摘要。")
+        st.caption("隐私提示：文献内容会发送至当前配置的模型服务商进行分析。")
+
+    return TaskFormData(
+        mode=mode,
+        topic=topic,
+        uploaded_papers=uploaded_papers,
+        paper_instruction=paper_instruction,
+        paper_upload_error=paper_upload_error,
+    )
+
+
+def render_report_delivery(
+    report: str,
+    *,
+    mode: str,
+    generated_at: str,
+    run_id: str,
+    heading: str = "最终报告",
+    description: str = "报告已完成审核，可直接预览或下载交付文件。",
+    download_prefix: str = "",
+) -> None:
+    st.markdown(section_heading_html("03", heading, description), unsafe_allow_html=True)
+    st.markdown(
+        report_meta_html(
+            mode=mode,
+            generated_at=generated_at,
+            run_id=run_id,
+            char_count=len(report),
+        ),
+        unsafe_allow_html=True,
+    )
+    download_slot = st.empty()
+    with st.container(border=True):
+        st.markdown(report)
+    with download_slot.container():
+        render_download_buttons(report, prefix=download_prefix)
+
+
+def build_last_report_record(*, report: str, topic: str, mode: str, run_id: str) -> dict[str, str]:
+    return {
+        "report": report,
+        "topic": topic,
+        "mode": mode,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "run_id": run_id,
+    }
+
+
 def main() -> None:
     st.set_page_config(
-        page_title="Auto Report Agent",
+        page_title="智能报告工作台 · Auto Report Agent",
         page_icon="📑",
         layout="wide",
+        initial_sidebar_state="auto",
     )
-
-    st.title("📑 Auto Report Agent")
-    st.caption(
-        "基于 CrewAI 的自动报告生成系统，支持主题研究报告、文献分析总结、图片识别、PDF/Word 导出和运行过程展示。"
-    )
-
-    with st.sidebar:
-        st.header("使用说明")
-        st.markdown(
-            """
-            1. 选择模式：主题研究报告 / 文献分析总结  
-            2. 主题模式下，可输入主题并可选上传图片辅助识别  
-            3. 文献模式下，可上传 PDF / DOCX / TXT / MD 文献并填写分析要求  
-            4. 点击 **生成报告**  
-            5. 页面会展示任务运行过程摘要，并支持下载 Markdown、PDF、Word
-            """
-        )
-        st.divider()
-        st.info("模型调用：支持 OpenAI-compatible API，可在下方配置个人 API。")
-        st.info("联网搜索：优先使用 Responses API web_search，并兼容旧版 web_search_preview。")
-        st.info(
-            "文献解析：支持 PDF / DOCX / TXT / MD；文献会先分块阅读、阶段性摘要，再生成最终报告，减少长文献超时。"
-        )
-        st.warning("部署给他人使用时，建议让用户在页面填写自己的 API，不要把公共 Key 写死。")
-        st.caption("说明：页面展示的是可观察执行过程，不展示模型完整隐藏推理链。")
-
-        st.divider()
-        api_config = render_api_config_panel()
-        st.divider()
-        show_detailed_thinking = st.toggle(
-            "显示详细思考过程",
-            value=True,
-            help="开启后每个步骤可展开查看 Agent 思考、调用参数、工具返回；关闭则只显示一行摘要。",
-        )
-        st.divider()
-        if is_public_deployment():
-            st.caption("公共部署模式已禁用全局缓存清理。")
-        else:
-            render_cache_manager()
+    st.markdown(APP_STYLES, unsafe_allow_html=True)
 
     if "session_id" not in st.session_state:
         st.session_state.session_id = secrets.token_hex(16)
@@ -637,93 +983,71 @@ def main() -> None:
         for message in sweep.errors:
             LOGGER.warning("Retention sweep could not remove an entry: %s", message)
 
+    api_config, show_execution_details = render_sidebar()
+    api_ready = is_api_config_ready(api_config)
+    st.markdown(hero_html(api_ready=api_ready), unsafe_allow_html=True)
+
+    progress_slot = st.empty()
+    progress_slot.markdown(page_progress_html(0), unsafe_allow_html=True)
+
+    st.markdown(
+        section_heading_html(
+            "01", "配置任务", "选择工作模式，并提供这次报告需要回答的问题与素材。"
+        ),
+        unsafe_allow_html=True,
+    )
     mode_label = st.radio(
         "选择任务模式",
-        ["主题研究报告", "文献分析总结"],
+        ["主题研究", "文献综述"],
         horizontal=True,
+        label_visibility="collapsed",
+        key="task_mode",
     )
-    mode = "paper" if mode_label == "文献分析总结" else "topic"
+    mode = "paper" if mode_label == "文献综述" else "topic"
+    presentation = mode_presentation(mode)
+    st.markdown(mode_intro_html(presentation), unsafe_allow_html=True)
+    form = render_task_form(mode)
 
-    uploaded_image = None
-    uploaded_image_bytes: bytes | None = None
-    uploaded_image_mime = ""
-    image_upload_error = ""
-    image_instruction = ""
-    uploaded_papers: list[Any] = []
-    paper_instruction = ""
-
-    if mode == "topic":
-        topic = st.text_input(
-            "请输入报告主题或任务目标",
-            placeholder="例如：给我找最新的深度学习关于 Agent 的论文",
-            max_chars=MAX_TOPIC_CHARS,
+    readiness = build_readiness_items(
+        mode=mode,
+        api_ready=api_ready,
+        has_topic=bool(form.topic.strip()),
+        has_image=form.uploaded_image is not None,
+        image_valid=not form.image_upload_error,
+        document_count=len(form.uploaded_papers or []),
+        documents_valid=not form.paper_upload_error,
+        document_error=form.paper_upload_error,
+    )
+    with st.container(border=True):
+        st.markdown(
+            panel_title_html("任务就绪检查", "所有必需项通过后即可启动"),
+            unsafe_allow_html=True,
         )
-        uploaded_image = st.file_uploader(
-            "上传图片（可选）",
-            type=["png", "jpg", "jpeg", "webp"],
-            help="可以上传截图、图表、论文页面、题目图片、产品页面等。",
-        )
-
-        if uploaded_image is not None:
-            uploaded_image_bytes = uploaded_image.getvalue()
-            uploaded_image_mime = (uploaded_image.type or "").strip().lower()
-            if uploaded_image_mime == "image/jpg":
-                uploaded_image_mime = "image/jpeg"
-            try:
-                validate_image_bytes(
-                    uploaded_image_bytes,
-                    mime_type=uploaded_image_mime,
-                    max_bytes=env_int("MAX_IMAGE_MB", 10, 1, 50) * 1024 * 1024,
-                )
-            except (RuntimeError, ValueError) as exc:
-                image_upload_error = str(exc)
-                st.error(f"图片上传校验失败：{image_upload_error}")
+        st.markdown(readiness_html(readiness), unsafe_allow_html=True)
+        action_hint, action_button = st.columns([1.45, 1], gap="large")
+        with action_hint:
+            if can_generate(readiness):
+                st.caption("输入已就绪。生成期间请保持页面打开，长文献可能需要较长时间。")
             else:
-                st.image(uploaded_image_bytes, caption="已上传图片", use_container_width=True)
-            image_instruction = st.text_area(
-                "针对图片的补充指令（可选）",
-                placeholder="例如：识别图中的论文标题并帮我找相关最新研究；或根据截图内容写一份分析报告。",
-                height=90,
-                max_chars=MAX_INSTRUCTION_CHARS,
+                st.caption("未就绪项目会显示为空心圆；模型连接设置位于左侧栏。")
+        with action_button:
+            generate_clicked = st.button(
+                presentation.cta,
+                type="primary",
+                use_container_width=True,
+                disabled=not can_generate(readiness),
+                key="generate_report",
             )
-    else:
-        topic = st.text_input(
-            "请输入文献主题或综述方向（可选）",
-            placeholder="例如：多智能体系统在软件工程中的研究进展",
-            max_chars=MAX_TOPIC_CHARS,
-        )
-        paper_instruction = st.text_area(
-            "请输入文献分析要求",
-            placeholder="例如：请总结每篇文献的研究问题、方法、实验结果、创新点和局限性，并给出综合对比。",
-            height=120,
-            max_chars=MAX_INSTRUCTION_CHARS,
-        )
-        uploaded_papers = st.file_uploader(
-            "上传文献文件",
-            type=["pdf", "docx", "txt", "md"],
-            accept_multiple_files=True,
-            help="支持上传 PDF / DOCX / TXT / MD，可一次上传多篇。",
-        )
-        st.caption(
-            f"最多 {env_int('MAX_DOCUMENTS', 5, 1, 20)} 篇；"
-            f"单文件上限 {env_int('MAX_DOCUMENT_FILE_MB', 25, 1, 50)} MB；"
-            f"总上限 {env_int('MAX_DOCUMENT_TOTAL_MB', 50, 1, 50)} MB。"
-            "超长文献会均匀覆盖开头、中部和结尾。"
-        )
-
-    col1, _ = st.columns([1, 4])
-    with col1:
-        generate_clicked = st.button("生成报告", type="primary", use_container_width=True)
 
     if generate_clicked:
-        if image_upload_error:
+        if form.image_upload_error:
             st.error("请更换符合大小、格式和文件签名要求的图片后重试。")
             return
-        api_ready = all(
-            str(api_config.get(key) or "").strip() for key in ("api_key", "base_url", "model")
-        )
+        if form.paper_upload_error:
+            st.error("请调整文献数量或大小后重试。")
+            return
         if not api_ready:
-            st.error("请先在左侧「API 配置」里填写 API Key、Base URL 和文本模型名。")
+            st.error("请先在左侧完成模型连接配置。")
             return
         try:
             llm_config = llm_config_from_mapping(api_config)
@@ -732,48 +1056,59 @@ def main() -> None:
             return
 
         if mode == "topic":
-            if not topic.strip() and uploaded_image is None:
+            if not form.topic.strip() and form.uploaded_image is None:
                 st.error("请先输入报告主题，或上传一张图片。")
                 return
-        elif not uploaded_papers:
+        elif not form.uploaded_papers:
             st.error("文献分析模式下，请至少上传一篇文献。")
             return
 
-        st.subheader("运行过程")
+        progress_slot.markdown(page_progress_html(1), unsafe_allow_html=True)
+        st.markdown(
+            section_heading_html(
+                "02", "Agent 执行", "查看当前阶段与可观察事件；不会展示模型隐藏推理链。"
+            ),
+            unsafe_allow_html=True,
+        )
         timeline_container = st.container()
-        timeline = EventTimeline(timeline_container, show_detail=show_detailed_thinking)
+        timeline = EventTimeline(timeline_container, show_detail=show_execution_details)
         timeline.log("收到任务，开始初始化。", icon="📨")
         paper_context = ""
-        final_topic = topic.strip()
+        final_topic = form.topic.strip()
 
         if mode == "topic":
             image_analysis = None
-            if uploaded_image is not None:
+            if form.uploaded_image is not None:
                 timeline.log("检测到图片输入，开始进行视觉识别。", icon="🖼️")
                 with st.spinner("正在识别图片内容..."):
                     try:
                         image_analysis = analyze_image_content(
-                            uploaded_image_bytes or b"",
-                            mime_type=uploaded_image_mime,
-                            instruction=image_instruction,
+                            form.uploaded_image_bytes or b"",
+                            mime_type=form.uploaded_image_mime,
+                            instruction=form.image_instruction,
                             config=llm_config,
                         )
                         timeline.log("图片识别完成，准备把识别结果交给报告 Agent。", icon="✅")
                     except Exception as exc:
                         timeline.log("图片识别失败。", icon="❌")
                         timeline.finalize(success=False)
+                        progress_slot.markdown(
+                            page_progress_html(1, error=True), unsafe_allow_html=True
+                        )
                         st.error("图片识别失败，请检查模型是否支持视觉输入，或换用支持图片的模型。")
                         _render_exception(exc)
                         return
 
-                with st.expander("查看图片识别结果", expanded=True):
+                with st.expander("输入材料 · 图片识别结果", expanded=False):
                     st.markdown(image_analysis)
 
-            final_topic = build_topic_from_inputs(topic, image_analysis, image_instruction)
+            final_topic = build_topic_from_inputs(
+                form.topic, image_analysis, form.image_instruction
+            )
             timeline.log("任务输入已整理完成，即将执行研究、写作和审核。", icon="🧭")
             spinner_text = "Agent 正在研究、写作和审核，请稍等..."
         else:
-            final_topic = build_paper_topic(topic, paper_instruction)
+            final_topic = build_paper_topic(form.topic, form.paper_instruction)
             timeline.log("检测到文献输入，开始解析上传文件。", icon="📄")
             with st.spinner("正在解析文献内容..."):
                 try:
@@ -782,7 +1117,7 @@ def main() -> None:
                     max_total_bytes = env_int("MAX_DOCUMENT_TOTAL_MB", 50, 1, 50) * 1024 * 1024
                     max_chars_per_doc = env_int("PAPER_MAX_CHARS_PER_DOC", 120000, 20000, 200000)
                     documents = parse_uploaded_documents(
-                        uploaded_papers,
+                        form.uploaded_papers or [],
                         max_docs=max_documents,
                         max_chars_per_doc=max_chars_per_doc,
                         max_file_bytes=max_file_bytes,
@@ -799,11 +1134,14 @@ def main() -> None:
                 except Exception as exc:
                     timeline.log("文献解析失败。", icon="❌")
                     timeline.finalize(success=False)
+                    progress_slot.markdown(
+                        page_progress_html(1, error=True), unsafe_allow_html=True
+                    )
                     st.error("文献解析失败，请检查文件格式、文件内容或依赖是否安装完整。")
                     _render_exception(exc)
                     return
 
-            with st.expander("查看文献提取预览", expanded=False):
+            with st.expander("输入材料 · 文献提取预览", expanded=False):
                 st.markdown(build_paper_preview(documents))
 
             with st.spinner("正在分阶段阅读文献并生成阶段性摘要，请稍等..."):
@@ -811,7 +1149,7 @@ def main() -> None:
                     staged_result = summarize_documents_staged(
                         documents,
                         topic=final_topic,
-                        instruction=paper_instruction,
+                        instruction=form.paper_instruction,
                         progress=timeline.log,
                         cache_namespace=str(st.session_state.session_id),
                         config=llm_config,
@@ -825,6 +1163,9 @@ def main() -> None:
                 except Exception as exc:
                     timeline.log("分阶段文献阅读失败。", icon="❌")
                     timeline.finalize(success=False)
+                    progress_slot.markdown(
+                        page_progress_html(1, error=True), unsafe_allow_html=True
+                    )
                     st.error(
                         "分阶段文献阅读失败。通常是模型接口超时或 API 配置异常。"
                         "请稍后重试，或调小 PAPER_CHUNK_SIZE / PAPER_MAX_CHUNKS_PER_DOC。"
@@ -832,7 +1173,7 @@ def main() -> None:
                     _render_exception(exc)
                     return
 
-            with st.expander("查看分阶段文献综合材料", expanded=False):
+            with st.expander("运行材料 · 分阶段文献综合", expanded=False):
                 st.markdown(paper_context)
 
             timeline.log("文献阶段性摘要已整理完成，即将执行写作和审核。", icon="🧭")
@@ -846,47 +1187,59 @@ def main() -> None:
                     llm_config=llm_config,
                     timeline=timeline,
                     paper_context=paper_context,
-                    paper_instruction=paper_instruction,
+                    paper_instruction=form.paper_instruction,
                     run_paths=run_paths,
                 )
             except Exception as exc:
                 timeline.log("报告生成失败。", icon="❌")
                 timeline.finalize(success=False)
+                progress_slot.markdown(page_progress_html(1, error=True), unsafe_allow_html=True)
                 st.error("报告生成失败，请检查 API Key、模型能力、网络连接或终端报错。")
                 draft = load_preserved_draft(mode=mode, paths=run_paths)
                 if draft:
-                    st.warning("最终审核未完成，但已保留当前文献草稿，可先下载或手动检查。")
-                    render_download_buttons(draft, prefix="草稿")
-                    with st.expander("查看失败前保留的文献草稿", expanded=False):
-                        st.markdown(draft)
+                    st.warning("流程未完整结束，但已保留当前可用文献产物，可先下载或手动检查。")
+                    render_report_delivery(
+                        draft,
+                        mode=mode,
+                        generated_at=datetime.now().isoformat(timespec="seconds"),
+                        run_id=run_paths.run_id,
+                        heading="可恢复的文献产物",
+                        description="审核流程未完整结束；以下内容可能仍需人工复核。",
+                        download_prefix="恢复产物",
+                    )
                 _render_exception(exc)
                 return
 
         timeline.log("最终报告已生成，可以预览和下载。", icon="🎉")
         timeline.finalize(success=True)
-        st.success("报告生成完成！")
-        st.subheader("最终报告")
-        st.session_state.last_report = {
-            "report": report,
-            "topic": final_topic,
-            "mode": mode,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "run_id": run_paths.run_id,
-        }
-        render_download_buttons(report)
-        st.markdown(report)
+        progress_slot.markdown(page_progress_html(2), unsafe_allow_html=True)
+        st.session_state.last_report = build_last_report_record(
+            report=report,
+            topic=final_topic,
+            mode=mode,
+            run_id=run_paths.run_id,
+        )
+        st.success("报告已完成写作与审核，可以交付。")
+        meta = st.session_state.last_report
+        render_report_delivery(
+            report,
+            mode=mode,
+            generated_at=str(meta["generated_at"]),
+            run_id=run_paths.run_id,
+        )
 
     elif "last_report" in st.session_state:
         meta = st.session_state.last_report
         existing_report = str(meta["report"])
-        st.subheader("本会话历史报告")
-        mode_text = "文献分析" if meta.get("mode") == "paper" else "主题研究"
-        st.info(
-            f"以下是当前浏览器会话上一次生成的报告（{mode_text}），生成于 "
-            f"`{meta.get('generated_at', '未知时间')}`，运行 ID：`{meta.get('run_id', '未知')}`。"
+        render_report_delivery(
+            existing_report,
+            mode=str(meta.get("mode") or "topic"),
+            generated_at=str(meta.get("generated_at") or "未知时间"),
+            run_id=str(meta.get("run_id") or "未知"),
+            heading="本会话上次生成",
+            description="这是当前浏览器会话最近一次成功交付的报告。",
+            download_prefix="上次结果",
         )
-        render_download_buttons(existing_report, prefix="历史")
-        st.markdown(existing_report)
 
 
 if __name__ == "__main__":

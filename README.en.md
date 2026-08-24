@@ -13,6 +13,12 @@ An automated report-generation project built on **CrewAI + Streamlit + OpenAI-co
 
 The project is designed as a portfolio piece for AI Agent / multi-agent collaboration / automated research-writing work.
 
+## Interface preview
+
+A professional Chinese AI report workspace supporting topic research, image understanding, literature reviews, observable agent execution, and Markdown / PDF / Word delivery. The screenshot uses demo values and contains no usable API credential.
+
+![Auto Report Agent workspace](docs/images/workspace-preview.png)
+
 ## Features
 
 - **Multi-agent workflow**: researcher, writer, and reviewer agents collaborate.
@@ -38,6 +44,7 @@ auto_report_agent/
 │       ├── crew.py
 │       ├── document_ingest.py
 │       ├── docx_export.py
+│       ├── frontend.py
 │       ├── main.py
 │       ├── openai_web_search_tool.py
 │       ├── pdf_export.py
@@ -49,6 +56,9 @@ auto_report_agent/
 │       └── config/
 │           ├── agents.yaml
 │           └── tasks.yaml
+├── docs/
+│   └── images/
+│       └── workspace-preview.png
 ├── output/
 ├── tests/
 ├── .env.example
